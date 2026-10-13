@@ -1,0 +1,16 @@
+# Secrets & local state — never commit these
+config.toml
+*.state.json
+state.json
+token.json
+credentials.json
+.secrets/
+
+# Debug artifacts from the Workday scraper
+snapshots/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

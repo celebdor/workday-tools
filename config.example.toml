@@ -1,0 +1,32 @@
+# Copy to config.toml and fill in. config.toml is gitignored.
+
+[workday]
+# Your tenant's base URL, e.g. https://wd5.myworkday.com/<tenant>/
+home_url = "https://wd5.myworkday.com/CHANGE_ME/d/home.htmld"
+
+# The team absence / time-off calendar view you want to scrape.
+# Open it in your browser once and copy the URL from the address bar.
+absence_calendar_url = "https://wd5.myworkday.com/CHANGE_ME/d/CHANGE_ME.htmld"
+
+# A substring that only appears in the URL *after* you're fully logged in
+# (i.e. not on the SSO/IdP login pages). Used to detect a successful login.
+# Often just your tenant path, e.g. "myworkday.com/CHANGE_ME/d/".
+login_success_url_substring = "myworkday.com/CHANGE_ME/d/"
+
+[google]
+# The calendar ID of the shared team calendar (Google Calendar settings ->
+# "Integrate calendar" -> Calendar ID). Looks like an email address.
+calendar_id = "CHANGE_ME@group.calendar.google.com"
+
+[sync]
+timezone = "Europe/Madrid"
+# Window of days to keep in sync, relative to today.
+days_back = 14
+days_forward = 120
+# If true, prefix every synced event summary with this (helps humans spot
+# machine-managed events). Leave empty to disable.
+summary_prefix = ""
+
+# Local times (24h "HH:MM") at which the tray app auto-runs a sync.
+# A slot that's already passed when the app starts runs once as a catch-up.
+sync_times = ["09:30", "15:30"]
