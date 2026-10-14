@@ -1,0 +1,37 @@
+[project]
+name = "workday-tools"
+description = "Browser-driven Workday tooling with API-based Google Calendar sync."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Antoni Segura Puimedon" }]
+keywords = ["workday", "google-calendar", "playwright", "absence", "sync"]
+dynamic = ["version"]
+dependencies = [
+    "playwright>=1.47",
+    "google-api-python-client>=2.140",
+    "google-auth>=2.33",
+    "google-auth-oauthlib>=1.2",
+    "pystray>=0.19",
+    "Pillow>=10.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/celebdor/workday-tools"
+Repository = "https://github.com/celebdor/workday-tools"
+
+[project.scripts]
+wdtools = "wdtools.__main__:main"
+# Convenience wrapper so `uv tool install` users (who only get *our* entry
+# points, not Playwright's own CLI) can fetch Chromium in one step.
+wdtools-playwright-install = "wdtools.browsers:install"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "wdtools/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wdtools"]

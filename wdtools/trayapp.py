@@ -147,6 +147,7 @@ class TrayApp:
 
     def _scheduler(self) -> None:
         fired: set[tuple[str, str]] = set()
+        last_session_check = datetime.now()  # a check is already enqueued at launch
         while not self._stop.wait(20):
             now = datetime.now()
             today = now.date().isoformat()
@@ -157,6 +158,14 @@ class TrayApp:
                 if (now.hour, now.minute) >= (hh, mm) and slot not in fired:
                     fired.add(slot)
                     self._enqueue(self._task_sync)
+
+            # Periodically re-check the saved session so an expiry while idle turns
+            # the icon amber on its own. Skip while syncing or showing an error so
+            # we don't clobber that state.
+            if (now - last_session_check).total_seconds() >= SESSION_RECHECK_SECONDS:
+                last_session_check = now
+                if self.state in (State.IDLE, State.NEEDS_LOGIN):
+                    self._enqueue(self._task_check_session)
 
     # ---- lifecycle --------------------------------------------------------
 

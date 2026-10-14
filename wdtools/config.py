@@ -2,15 +2,107 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+import sys
+import textwrap
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 
-def _state_dir() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-    return Path(base) / "workday-tools"
+APP_DIR_NAME = "workday-tools"
+
+# Written verbatim by `wdtools init`. Kept in sync with config.example.toml.
+CONFIG_TEMPLATE = """\
+# wdtools configuration. Fill in the CHANGE_ME values.
+
+[workday]
+# Your tenant's base URL, e.g. https://wd5.myworkday.com/<tenant>/
+home_url = "https://wd5.myworkday.com/CHANGE_ME/d/home.htmld"
+
+# The team absence / time-off calendar view you want to scrape.
+# Open it in your browser once and copy the URL from the address bar.
+absence_calendar_url = "https://wd5.myworkday.com/CHANGE_ME/d/CHANGE_ME.htmld"
+
+# A substring that only appears in the URL *after* you're fully logged in
+# (i.e. not on the SSO/IdP login pages). Used to detect a successful login.
+# Often just your tenant path, e.g. "myworkday.com/CHANGE_ME/d/".
+login_success_url_substring = "myworkday.com/CHANGE_ME/d/"
+
+[google]
+# The calendar ID of the shared team calendar (Google Calendar settings ->
+# "Integrate calendar" -> Calendar ID). Looks like an email address.
+calendar_id = "CHANGE_ME@group.calendar.google.com"
+
+[sync]
+timezone = "Europe/Madrid"
+# Window of days to keep in sync, relative to today.
+days_back = 14
+days_forward = 120
+# If true, prefix every synced event summary with this (helps humans spot
+# machine-managed events). Leave empty to disable.
+summary_prefix = ""
+
+# Local times (24h "HH:MM") at which the tray app auto-runs a sync.
+# A slot that's already passed when the app starts runs once as a catch-up.
+sync_times = ["09:30", "15:30"]
+"""
+
+
+def config_dir() -> Path:
+    """Directory for config and user-supplied secrets (config.toml, credentials.json).
+
+    Honors ``XDG_CONFIG_HOME`` as a cross-platform override; otherwise follows
+    each platform's convention (``~/Library/Application Support`` on macOS,
+    ``~/.config`` elsewhere).
+    """
+    base = os.environ.get("XDG_CONFIG_HOME")
+    if base:
+        return Path(base) / APP_DIR_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_DIR_NAME
+    return Path.home() / ".config" / APP_DIR_NAME
+
+
+def state_dir() -> Path:
+    """Directory for app-managed state (the Workday session, the Google token).
+
+    Per the XDG Base Directory spec these belong in ``XDG_STATE_HOME`` (default
+    ``~/.local/state``), not alongside config. macOS has no separate state
+    location, so it reuses Application Support.
+    """
+    base = os.environ.get("XDG_STATE_HOME")
+    if base:
+        return Path(base) / APP_DIR_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_DIR_NAME
+    return Path.home() / ".local" / "state" / APP_DIR_NAME
+
+
+def log_dir() -> Path:
+    """Directory for log files.
+
+    macOS has a dedicated convention (``~/Library/Logs``); elsewhere logs are
+    state, so they go under ``XDG_STATE_HOME`` (default ``~/.local/state``).
+    """
+    if sys.platform == "darwin" and not os.environ.get("XDG_STATE_HOME"):
+        return Path.home() / "Library" / "Logs" / APP_DIR_NAME
+    return state_dir() / "logs"
+
+
+def default_config_path() -> Path:
+    """Where `init` writes, and where commands look for config.toml by default."""
+    return config_dir() / "config.toml"
+
+
+def _migrate(old: Path, new: Path) -> None:
+    """Move a state file left behind in the config dir by an earlier version."""
+    if old != new and old.exists() and not new.exists():
+        new.parent.mkdir(parents=True, exist_ok=True)
+        old.replace(new)
 
 
 @dataclass(frozen=True)
@@ -37,7 +129,7 @@ class Config:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(
-                f"{path} not found. Copy config.example.toml to config.toml and fill it in."
+                f"{path} not found. Run `wdtools init` to create it, then fill it in."
             )
         with path.open("rb") as fh:
             raw = tomllib.load(fh)
@@ -46,8 +138,14 @@ class Config:
         g = raw.get("google", {})
         s = raw.get("sync", {})
 
-        sd = _state_dir()
+        cd = config_dir()
+        cd.mkdir(parents=True, exist_ok=True)
+        sd = state_dir()
         sd.mkdir(parents=True, exist_ok=True)
+
+        # Move state files written to the config dir by earlier versions.
+        _migrate(cd / "workday.state.json", sd / "workday.state.json")
+        _migrate(cd / "token.json", sd / "token.json")
 
         cfg = cls(
             workday_home_url=_require(wd, "workday.home_url"),
@@ -60,15 +158,77 @@ class Config:
             summary_prefix=s.get("summary_prefix", ""),
             sync_times=_parse_times(s.get("sync_times", ["09:30", "15:30"])),
             state_path=sd / "workday.state.json",
-            google_credentials_path=sd / "credentials.json",
+            google_credentials_path=cd / "credentials.json",
             google_token_path=sd / "token.json",
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Resolved configuration:\n%s", cfg.as_box(path))
         cfg.validate()
         return cfg
 
     def validate(self) -> None:
         if "CHANGE_ME" in self.workday_home_url + self.absence_calendar_url + self.calendar_id:
             raise ValueError("config.toml still contains CHANGE_ME placeholders — fill them in.")
+
+    def as_box(self, source: Path) -> str:
+        """Render the resolved config as a bordered, width-wrapped block."""
+        sections: list[tuple[str, list[tuple[str, object]]]] = [
+            ("source", [("config.toml", source)]),
+            (
+                "workday",
+                [
+                    ("home_url", self.workday_home_url),
+                    ("absence_calendar_url", self.absence_calendar_url),
+                    ("login_success_url_substring", self.login_success_url_substring),
+                ],
+            ),
+            ("google", [("calendar_id", self.calendar_id)]),
+            (
+                "sync",
+                [
+                    ("timezone", self.timezone),
+                    ("days_back", self.days_back),
+                    ("days_forward", self.days_forward),
+                    ("summary_prefix", repr(self.summary_prefix)),
+                    ("sync_times", ", ".join(self.sync_times)),
+                ],
+            ),
+            (
+                "paths",
+                [
+                    ("state_path", self.state_path),
+                    ("google_credentials_path", self.google_credentials_path),
+                    ("google_token_path", self.google_token_path),
+                ],
+            ),
+        ]
+        return _render_box("Resolved configuration", sections)
+
+
+def _render_box(title: str, sections: list[tuple[str, list[tuple[str, object]]]]) -> str:
+    """Draw a bordered box; long values wrap with a hanging indent."""
+    width = min(shutil.get_terminal_size((100, 24)).columns, 100)
+    inner = max(width - 4, 20)  # room for "│ " … " │"
+    labels = [lbl for _, rows in sections for lbl, _ in rows]
+    pad = min(max((len(x) for x in labels), default=0), inner - 10)
+
+    body: list[str] = []
+    for i, (name, rows) in enumerate(sections):
+        if i:
+            body.append("")
+        body.append(f"[{name}]")
+        for label, value in rows:
+            line = f"  {label:<{pad}} = {value}"
+            wrapped = textwrap.wrap(line, inner, subsequent_indent=" " * (pad + 5))
+            body.extend(wrapped or [line])
+
+    top = "┌─ " + title + " " + "─" * max(width - 5 - len(title), 0) + "┐"
+    bottom = "└" + "─" * (width - 2) + "┘"
+    rows_out = [top]
+    for text in body:
+        rows_out.append("│ " + text[:inner].ljust(inner) + " │")
+    rows_out.append(bottom)
+    return "\n".join(rows_out)
 
 
 def _parse_times(values) -> tuple[str, ...]:

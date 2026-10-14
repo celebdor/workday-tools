@@ -8,6 +8,7 @@ added by hand, and without creating duplicates on re-runs.
 
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from googleapiclient.discovery import build
 from .config import Config
 from .models import AbsenceEvent
 
+logger = logging.getLogger(__name__)
+
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 SOURCE_TAG = "workday-sync"  # marks events we own, via extendedProperties.private
 
@@ -28,8 +31,10 @@ def _credentials(cfg: Config) -> Credentials:
     if Path(cfg.google_token_path).exists():
         creds = Credentials.from_authorized_user_file(str(cfg.google_token_path), SCOPES)
     if creds and creds.valid:
+        logger.debug("Using cached Google token at %s", cfg.google_token_path)
         return creds
     if creds and creds.expired and creds.refresh_token:
+        logger.info("Refreshing expired Google token.")
         creds.refresh(Request())
     else:
         if not Path(cfg.google_credentials_path).exists():
@@ -38,6 +43,7 @@ def _credentials(cfg: Config) -> Credentials:
                 "Create an OAuth client (Desktop app) in Google Cloud Console and "
                 "save the downloaded JSON there. See README."
             )
+        logger.info("No valid token; starting Google consent flow in a browser.")
         flow = InstalledAppFlow.from_client_secrets_file(
             str(cfg.google_credentials_path), SCOPES
         )
@@ -48,6 +54,26 @@ def _credentials(cfg: Config) -> Credentials:
 
 def _service(cfg: Config):
     return build("calendar", "v3", credentials=_credentials(cfg), cache_discovery=False)
+
+
+def authorize(cfg: Config):
+    """Run the Google consent flow (writing token.json) and return a service.
+
+    Used by `setup-google` to authorize ahead of the first sync; raises the same
+    helpful FileNotFoundError as sync if the OAuth client JSON isn't in place yet.
+    """
+    return _service(cfg)
+
+
+def check_calendar_access(cfg: Config) -> str:
+    """Confirm the authorized account can read the configured calendar.
+
+    Returns a human-readable confirmation string; raises on failure. Uses an
+    events list (allowed by our calendar.events scope) rather than calendars.get.
+    """
+    service = _service(cfg)
+    service.events().list(calendarId=cfg.calendar_id, maxResults=1).execute()
+    return f"Access to calendar {cfg.calendar_id} confirmed."
 
 
 def _to_gcal_body(ev: AbsenceEvent, cfg: Config) -> dict:
@@ -67,6 +93,10 @@ def _to_gcal_body(ev: AbsenceEvent, cfg: Config) -> dict:
 
 def _fetch_managed(service, cfg: Config, window_start: date, window_end: date) -> dict[str, dict]:
     """Return {wdKey: event} for events we manage within the window."""
+    logger.debug(
+        "Querying managed events: privateExtendedProperty source=%s, %s .. %s",
+        SOURCE_TAG, window_start, window_end,
+    )
     managed: dict[str, dict] = {}
     page_token = None
     while True:
@@ -94,12 +124,18 @@ def _fetch_managed(service, cfg: Config, window_start: date, window_end: date) -
     return managed
 
 
+def _changed_fields(existing: dict, desired: dict) -> list[str]:
+    """Human-readable 'field: old -> new' notes for the fields reconcile compares."""
+    checks = [
+        ("summary", existing.get("summary"), desired["summary"]),
+        ("start", existing.get("start", {}).get("date"), desired["start"]["date"]),
+        ("end", existing.get("end", {}).get("date"), desired["end"]["date"]),
+    ]
+    return [f"{name}: {old!r} -> {new!r}" for name, old, new in checks if old != new]
+
+
 def _needs_update(existing: dict, desired: dict) -> bool:
-    return (
-        existing.get("summary") != desired["summary"]
-        or existing.get("start", {}).get("date") != desired["start"]["date"]
-        or existing.get("end", {}).get("date") != desired["end"]["date"]
-    )
+    return bool(_changed_fields(existing, desired))
 
 
 class SyncResult:
@@ -117,9 +153,12 @@ class SyncResult:
 
 
 def sync(cfg: Config, absences: list[AbsenceEvent], dry_run: bool = False) -> SyncResult:
+    tag = "[dry-run] " if dry_run else ""
     service = _service(cfg)
     window_start = date.today() - timedelta(days=cfg.days_back)
     window_end = date.today() + timedelta(days=cfg.days_forward)
+    logger.info("%sSyncing to calendar %s, window %s .. %s",
+                tag, cfg.calendar_id, window_start, window_end)
 
     # Only sync absences that fall inside the window (end >= window_start,
     # start < window_end), so we don't delete out-of-window managed events.
@@ -128,17 +167,26 @@ def sync(cfg: Config, absences: list[AbsenceEvent], dry_run: bool = False) -> Sy
         for ev in absences
         if ev.end >= window_start and ev.start < window_end
     }
+    logger.info("%d absence(s) fall within the window (tagged source=%s).",
+                len(desired), SOURCE_TAG)
+    logger.info("Fetching existing workday-managed events…")
     existing = _fetch_managed(service, cfg, window_start, window_end)
+    logger.info("Found %d managed event(s) already on the calendar "
+                "(hand-added events are not fetched and never touched).", len(existing))
 
     result = SyncResult()
 
     for key, ev in desired.items():
         body = _to_gcal_body(ev, cfg)
         if key not in existing:
+            logger.info("%screate: %s (%s..%s)", tag, body["summary"], ev.start, ev.end)
+            logger.debug("  wdKey=%s (no managed event with this key)", key)
             if not dry_run:
                 service.events().insert(calendarId=cfg.calendar_id, body=body).execute()
             result.created += 1
         elif _needs_update(existing[key], body):
+            logger.info("%supdate: %s (%s..%s)", tag, body["summary"], ev.start, ev.end)
+            logger.debug("  wdKey=%s changed %s", key, "; ".join(_changed_fields(existing[key], body)))
             if not dry_run:
                 service.events().update(
                     calendarId=cfg.calendar_id,
@@ -147,14 +195,18 @@ def sync(cfg: Config, absences: list[AbsenceEvent], dry_run: bool = False) -> Sy
                 ).execute()
             result.updated += 1
         else:
+            logger.debug("unchanged: %s (%s..%s) wdKey=%s", body["summary"], ev.start, ev.end, key)
             result.unchanged += 1
 
     for key, item in existing.items():
         if key not in desired:
+            logger.info("%sdelete: %s", tag, item.get("summary", key))
+            logger.debug("  wdKey=%s (managed event no longer in Workday within window)", key)
             if not dry_run:
                 service.events().delete(
                     calendarId=cfg.calendar_id, eventId=item["id"]
                 ).execute()
             result.deleted += 1
 
+    logger.info("%sSync complete: %s", tag, result)
     return result

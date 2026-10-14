@@ -13,17 +13,36 @@ Flow, matching the "log in once, then run in the background" model:
 
 from __future__ import annotations
 
+import logging
 import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 from playwright.sync_api import BrowserContext, Page, sync_playwright
+from playwright.sync_api import Error as PlaywrightError
 
 from .config import Config
 
+logger = logging.getLogger(__name__)
+
 # How long to wait for the human to finish logging in, in milliseconds.
 LOGIN_TIMEOUT_MS = 5 * 60 * 1000
+
+
+def _launch_chromium(pw, *, headless: bool):
+    """Launch Chromium, turning the "browser not installed" error into a hint."""
+    try:
+        return pw.chromium.launch(headless=headless)
+    except PlaywrightError as exc:
+        msg = str(exc)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            raise RuntimeError(
+                "Chromium isn't installed for Playwright yet. Run "
+                "`wdtools-playwright-install` once (or `uv run playwright install "
+                "chromium` in a dev checkout)."
+            ) from exc
+        raise
 
 
 def _looks_logged_in(page: Page, cfg: Config) -> bool:
@@ -33,7 +52,7 @@ def _looks_logged_in(page: Page, cfg: Config) -> bool:
 def interactive_login(cfg: Config) -> None:
     """Open a visible browser, let the user log in, and persist the session."""
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False)
+        browser = _launch_chromium(pw, headless=False)
         context = browser.new_context()
         page = context.new_page()
         page.goto(cfg.workday_home_url, wait_until="domcontentloaded")
@@ -65,7 +84,7 @@ def _session_is_valid(cfg: Config) -> bool:
     if not Path(cfg.state_path).exists():
         return False
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = _launch_chromium(pw, headless=True)
         try:
             context = browser.new_context(storage_state=str(cfg.state_path))
             page = context.new_page()
@@ -84,8 +103,12 @@ def _session_is_valid(cfg: Config) -> bool:
 
 def ensure_session(cfg: Config, force_login: bool = False) -> None:
     """Guarantee a usable saved session exists, prompting interactive login if not."""
-    if not force_login and _session_is_valid(cfg):
-        return
+    if not force_login:
+        logger.info("Checking saved Workday session…")
+        if _session_is_valid(cfg):
+            logger.info("Saved Workday session is valid; reusing it.")
+            return
+        logger.info("No valid saved session; interactive login required.")
     interactive_login(cfg)
 
 
@@ -98,7 +121,7 @@ def workday_context(cfg: Config, headless: bool = True) -> Iterator[BrowserConte
     if not Path(cfg.state_path).exists():
         raise RuntimeError("No saved Workday session. Run `login` (or `sync`) first.")
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
+        browser = _launch_chromium(pw, headless=headless)
         try:
             context = browser.new_context(storage_state=str(cfg.state_path))
             yield context
