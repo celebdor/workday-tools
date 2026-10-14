@@ -171,21 +171,23 @@ including third-party libraries — handy for watching a long sync or diagnosing
 wdtools sync --dry-run -v
 ```
 
-## One manual step remaining: Workday selectors
+## Adapting to another Workday tenant
 
-Workday's absence calendar markup is tenant-specific and obfuscated, so the
-scraper's selectors (`wdtools/workday.py`) start as a documented placeholder and
-need wiring to your actual view:
+The scraper (`wdtools/workday.py`) is wired against one specific Workday tenant: it dismisses
+the calendar's parameter prompt, switches to Month view, pages month-by-month, and
+parses the `flowController` JSON into absences. Workday markup is tenant-specific
+and obfuscated, so another tenant may need the selectors or parsing adjusted.
 
-1. `wdtools snapshot` — dumps rendered HTML + a screenshot to
-   `./snapshots`.
-2. Inspect the HTML to find how each absence encodes **person**, **type**, and
-   **start/end dates**.
-3. Update `SELECTORS` and `_parse_events` in `wdtools/workday.py`.
+1. `wdtools snapshot` — dumps the rendered HTML, a screenshot, and every XHR/JSON
+   response (with a `*-xhr-index.json` manifest) to `./snapshots`. Add
+   `--open-view-menu` to also capture the interval dropdown's markup.
+2. Find the response/elements carrying each absence (**person**, **type**,
+   **start/end dates**) and adjust `SELECTORS` / the parser in
+   `wdtools/workday.py`.
 
 **Shortcut worth checking first:** some Workday tenants expose an iCal /
 "Export to Calendar" / "Subscribe" link on time-off views. If yours does, that
-feed is far more stable than scraping — tell me and we'll parse the feed instead.
+feed is far more stable than scraping — parsing it instead is worth it.
 
 ## Scheduling
 

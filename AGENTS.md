@@ -43,7 +43,7 @@ spec before changing that area, and update it when you change the behavior.
   the on-screen period heading (`dateRangeTitle`) changing, not from a named
   network response. Entries are parsed from captured `flowController` JSON
   (`calendarEntry` widgets); only approved time off + holidays are kept, grouped
-  into contiguous-day events. Selectors are Red Hat-tenant-specific; re-derive via
+  into contiguous-day events. Selectors are tenant-specific; re-derive via
   `wdtools snapshot` (add `--open-view-menu` to capture the interval dropdown).
 - **Reconciliation** (`gcal.py`): see the spec. Never touch untagged events.
 - **Config/state/log dirs** (`config.py`): config + `credentials.json` in the

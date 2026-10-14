@@ -131,7 +131,7 @@ def _ensure_client_json(cfg: Config, project: str) -> None:
         "\nGoogle has no API to create a Desktop OAuth client, so do this once in\n"
         "the Console (both pages are opening in your browser):\n"
         "  1. Configure the OAuth consent screen. For a Workspace/organization\n"
-        "     account (e.g. @redhat.com) pick User type 'Internal' — no test users\n"
+        "     account (your corporate domain) pick User type 'Internal' — no test users\n"
         "     or app verification needed. For a personal Gmail pick 'External' and\n"
         "     add your own account under 'Test users'."
     )

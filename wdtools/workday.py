@@ -17,7 +17,7 @@ own event.
 
 Tenant note
 -----------
-The selectors and JSON shape below were wired up against a Red Hat tenant. If
+The selectors and JSON shape below were wired up against one Workday tenant. If
 the markup differs on yours, re-run ``wdtools snapshot`` — it dumps the rendered
 HTML, a screenshot, and every XHR/fetch JSON response (with a ``*-xhr-index.json``
 manifest) so you can re-check them. If your tenant offers an iCal / "Export to
