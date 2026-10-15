@@ -126,11 +126,15 @@ class TrayApp:
         self._task_check_session()
 
     def _task_sync(self) -> None:
-        # Make sure we have a session, but never pop a browser unattended here —
-        # that's what the "Log in" item is for.
+        # Never pop a browser unattended here — that's what the "Log in" item is for.
         logger.info("Sync requested.")
+        # If we already know we're logged out, skip cheaply: don't launch a headless
+        # browser just to re-confirm (that would block the queue behind each sync).
+        if self.state == State.NEEDS_LOGIN:
+            logger.info("Sync skipped: not logged in (use ‘Log in to Workday…’).")
+            return
         if not auth._session_is_valid(self.cfg):
-            logger.info("Sync skipped: no valid session (needs manual login).")
+            logger.info("Sync skipped: session expired; needs manual login.")
             self._set_state(State.NEEDS_LOGIN, "log in to enable syncing")
             return
         self._set_state(State.SYNCING)
@@ -158,16 +162,29 @@ class TrayApp:
                 self._tasks.task_done()
 
     def _scheduler(self) -> None:
-        fired: set[tuple[str, str]] = set()
+        def hhmm(t: str) -> tuple[int, int]:
+            hh, mm = t.split(":")
+            return int(hh), int(mm)
+
+        # Slots already past when we start today: mark them fired so we don't fire
+        # one retroactive sync *per* past slot — do a single startup catch-up.
+        now = datetime.now()
+        today = now.date().isoformat()
+        fired: set[tuple[str, str]] = {
+            (today, t) for t in self.cfg.sync_times if (now.hour, now.minute) >= hhmm(t)
+        }
+        if fired:
+            logger.info("Startup catch-up: %d past slot(s) today; enqueuing one sync.", len(fired))
+            self._enqueue(self._task_sync)
+
         last_session_check = datetime.now()  # a check is already enqueued at launch
         while not self._stop.wait(20):
             now = datetime.now()
             today = now.date().isoformat()
             fired = {slot for slot in fired if slot[0] == today}  # prune old days
             for t in self.cfg.sync_times:
-                hh, mm = (int(x) for x in t.split(":"))
                 slot = (today, t)
-                if (now.hour, now.minute) >= (hh, mm) and slot not in fired:
+                if (now.hour, now.minute) >= hhmm(t) and slot not in fired:
                     fired.add(slot)
                     logger.info("Scheduled sync time %s reached; enqueuing sync.", t)
                     self._enqueue(self._task_sync)
