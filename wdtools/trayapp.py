@@ -14,6 +14,7 @@ Design notes
 from __future__ import annotations
 
 import enum
+import logging
 import queue
 import threading
 from datetime import datetime
@@ -23,6 +24,8 @@ from PIL import Image, ImageDraw
 
 from . import auth, gcal, workday
 from .config import Config
+
+logger = logging.getLogger(__name__)
 
 
 class State(enum.Enum):
@@ -98,6 +101,7 @@ class TrayApp:
         )
 
     def _set_state(self, state: State, detail: str = "") -> None:
+        logger.info("State -> %s%s", state.name, f" ({detail})" if detail else "")
         self.state = state
         self.detail = detail
         self._icon.icon = _make_icon(_COLORS[state])
@@ -106,12 +110,17 @@ class TrayApp:
     # ---- tasks (run on the worker thread) --------------------------------
 
     def _task_check_session(self) -> None:
+        logger.info("Checking saved Workday session…")
         if auth._session_is_valid(self.cfg):
             self._set_state(State.IDLE)
         else:
-            self._set_state(State.NEEDS_LOGIN)
+            self._set_state(
+                State.NEEDS_LOGIN,
+                "click the tray → ‘Log in to Workday…’",
+            )
 
     def _task_login(self) -> None:
+        logger.info("Interactive Workday login requested; opening browser.")
         self._set_state(State.NEEDS_LOGIN, "opening browser…")
         auth.interactive_login(self.cfg)
         self._task_check_session()
@@ -119,7 +128,9 @@ class TrayApp:
     def _task_sync(self) -> None:
         # Make sure we have a session, but never pop a browser unattended here —
         # that's what the "Log in" item is for.
+        logger.info("Sync requested.")
         if not auth._session_is_valid(self.cfg):
+            logger.info("Sync skipped: no valid session (needs manual login).")
             self._set_state(State.NEEDS_LOGIN, "log in to enable syncing")
             return
         self._set_state(State.SYNCING)
@@ -141,6 +152,7 @@ class TrayApp:
             try:
                 task()
             except Exception as exc:  # keep the app alive; surface via the icon
+                logger.exception("Tray task failed: %s", task.__name__)
                 self._set_state(State.ERROR, str(exc).splitlines()[0][:80])
             finally:
                 self._tasks.task_done()
@@ -157,6 +169,7 @@ class TrayApp:
                 slot = (today, t)
                 if (now.hour, now.minute) >= (hh, mm) and slot not in fired:
                     fired.add(slot)
+                    logger.info("Scheduled sync time %s reached; enqueuing sync.", t)
                     self._enqueue(self._task_sync)
 
             # Periodically re-check the saved session so an expiry while idle turns
@@ -165,6 +178,7 @@ class TrayApp:
             if (now - last_session_check).total_seconds() >= SESSION_RECHECK_SECONDS:
                 last_session_check = now
                 if self.state in (State.IDLE, State.NEEDS_LOGIN):
+                    logger.debug("Periodic session recheck due; enqueuing check.")
                     self._enqueue(self._task_check_session)
 
     # ---- lifecycle --------------------------------------------------------

@@ -82,6 +82,7 @@ def interactive_login(cfg: Config) -> None:
 def _session_is_valid(cfg: Config) -> bool:
     """Open the saved session headlessly and confirm it still lands logged in."""
     if not Path(cfg.state_path).exists():
+        logger.debug("No saved session file at %s — session invalid.", cfg.state_path)
         return False
     with sync_playwright() as pw:
         browser = _launch_chromium(pw, headless=True)
@@ -94,8 +95,13 @@ def _session_is_valid(cfg: Config) -> bool:
                     lambda url: cfg.login_success_url_substring in url,
                     timeout=15_000,
                 )
+                logger.debug("Session check: landed logged in (%s).", page.url)
                 return True
             except Exception:
+                logger.debug(
+                    "Session check: did not reach a logged-in URL (at %s); "
+                    "session is expired/invalid.", page.url,
+                )
                 return False
         finally:
             browser.close()
