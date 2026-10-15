@@ -56,6 +56,9 @@ spec before changing that area, and update it when you change the behavior.
 
 - Dev checkout uses `uv`: `uv run wdtools <cmd>`. Browser: `uv run playwright
   install chromium` (or `wdtools-playwright-install`).
+- Linux tray needs the `tray-linux` extra (PyGObject) + system build/runtime libs
+  so pystray uses the AppIndicator backend instead of the menu-less `_xorg`
+  fallback; see the README Linux notes. `uv sync --extra tray-linux`.
 - `wdtools scrape` prints absences without writing; `wdtools sync --dry-run`
   previews calendar changes. Add `-v`/`-vv` for progress and debug detail.
 - No test suite yet; validate parser changes against a saved `snapshots/` payload

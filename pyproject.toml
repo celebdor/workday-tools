@@ -16,6 +16,13 @@ dependencies = [
     "Pillow>=10.0",
 ]
 
+[project.optional-dependencies]
+# Linux desktop tray: PyGObject lets pystray use the AppIndicator backend, whose
+# menu works under GNOME/Wayland (the X11 fallback's menu does not). Kept optional
+# so macOS and headless/CLI-only installs don't build it; needs system libraries
+# too (see the README's Linux notes). The marker no-ops it off Linux.
+tray-linux = ["pygobject>=3.50; sys_platform == 'linux'"]
+
 [project.urls]
 Homepage = "https://github.com/celebdor/workday-tools"
 Repository = "https://github.com/celebdor/workday-tools"

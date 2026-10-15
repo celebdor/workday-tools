@@ -55,11 +55,25 @@ later: `uv tool upgrade workday-tools`. To try it without installing:
 **macOS** — nothing more to install; the tray app runs in the menu bar out of
 the box.
 
-**Linux only** — the tray app needs system GTK/AppIndicator libraries (uv can't
-install these; they're not Python packages):
-- Fedora: `sudo dnf install libappindicator-gtk3 python3-gobject`
-- Debian/Ubuntu: `sudo apt install gir1.2-appindicator3-0.1 python3-gi`
-- GNOME also needs the *AppIndicator and KStatusNotifierItem* shell extension.
+**Linux only** — the tray needs PyGObject so pystray can use the AppIndicator
+backend (its menu works under GNOME/Wayland; the X11 fallback's does not).
+PyGObject builds against system libraries and must live in the same environment
+as `wdtools` (the distro's `python3-gobject` won't import into a different-version
+venv), so install the dev/runtime libs, then the `tray-linux` extra:
+
+- Fedora: `sudo dnf install gcc pkgconf python3-devel cairo-devel cairo-gobject-devel glib2-devel gobject-introspection-devel gtk3 libappindicator-gtk3`
+- Debian/Ubuntu: `sudo apt install build-essential pkg-config python3-dev libcairo2-dev libgirepository-2.0-dev gir1.2-gtk-3.0 gir1.2-appindicator3-0.1`
+
+Then install with the extra (adds PyGObject):
+- user: `uv tool install "workday-tools[tray-linux] @ git+https://github.com/celebdor/workday-tools"`
+- checkout: `uv sync --extra tray-linux`
+
+GNOME also needs the *AppIndicator and KStatusNotifierItem Support* shell
+extension enabled. Verify pystray picked the right backend (expect
+`pystray._appindicator`, not `pystray._xorg`):
+```bash
+python -c "import pystray; print(pystray.Icon.__module__)"
+```
 
 ### From a checkout (development)
 
