@@ -685,6 +685,12 @@ wheels = [
 ]
 
 [[package]]
+name = "pycairo"
+version = "1.29.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/5e/19ab2572981a996ce96b853a189d2dcced40506b67d9555a7568457abcf2/pycairo-1.29.2.tar.gz", hash = "sha256:3e69fff74fe64f5ba2dfa31f67c6bdf26413342574047437d2ac520d35e9a489", size = 666308, upload-time = "2026-10-04T19:11:03.81Z" }
+
+[[package]]
 name = "pycparser"
 version = "3.11"
 source = { registry = "https://pypi.org/simple" }
@@ -704,6 +710,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/8b/04/e7c1fe4dc78a6fdbf
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a0/c4/b4d4827c93ef43c01f599ef31453ccc1c132b353284fc6c87d535c233129/pyee-13.0.1-py3-none-any.whl", hash = "sha256:af2f8fede4171ef667dfded53f96e2ed0d6e6bd7ee3bb46437f77e3b57689228", size = 15659, upload-time = "2026-02-14T21:12:26.263Z" },
 ]
+
+[[package]]
+name = "pygobject"
+version = "3.58.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pycairo" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/65/1e/d590f82e14db75945b03f6b63e0f19662e0340babd8f574fdb1bb5a015e2/pygobject-3.58.1.tar.gz", hash = "sha256:4c80598ade17fbaa7798e01a25d0bf29ce109740786026a074c5c62bb3e79d23", size = 1408671, upload-time = "2026-10-09T11:29:48.929Z" }
 
 [[package]]
 name = "pyobjc-core"
@@ -871,6 +886,11 @@ dependencies = [
     { name = "pystray" },
 ]
 
+[package.optional-dependencies]
+tray-linux = [
+    { name = "pygobject", marker = "sys_platform == 'linux'" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "google-api-python-client", specifier = ">=2.140" },
@@ -878,5 +898,7 @@ requires-dist = [
     { name = "google-auth-oauthlib", specifier = ">=1.2" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "playwright", specifier = ">=1.47" },
+    { name = "pygobject", marker = "sys_platform == 'linux' and extra == 'tray-linux'", specifier = ">=3.50" },
     { name = "pystray", specifier = ">=0.19" },
 ]
+provides-extras = ["tray-linux"]
