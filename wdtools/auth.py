@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 
 
+def _notify(message: str) -> None:
+    """Surface a user-facing message to the log and, when possible, the terminal.
+
+    Always logged so it lands in ``tray.log``. Printing to stderr is best-effort:
+    the tray runs detached with no attached terminal, so writing to ``sys.stderr``
+    there raises ``OSError`` — swallow it rather than aborting the login task.
+    """
+    logger.info(message)
+    try:
+        print(message, file=sys.stderr)
+    except OSError:
+        pass
+
+
 def _launch_chromium(pw, *, headless: bool):
     """Launch Chromium, turning the "browser not installed" error into a hint."""
     try:
@@ -57,11 +71,10 @@ def interactive_login(cfg: Config) -> None:
         page = context.new_page()
         page.goto(cfg.workday_home_url, wait_until="domcontentloaded")
 
-        print(
+        _notify(
             "\n>>> A browser window has opened. Log in to Workday (SSO + MFA).\n"
             ">>> Once you can see your Workday home page, leave it — this will\n"
-            ">>> detect the login, save the session, and close the window.\n",
-            file=sys.stderr,
+            ">>> detect the login, save the session, and close the window.\n"
         )
 
         # Poll for a logged-in URL rather than relying on a single navigation,
@@ -75,7 +88,7 @@ def interactive_login(cfg: Config) -> None:
 
         cfg.state_path.parent.mkdir(parents=True, exist_ok=True)
         context.storage_state(path=str(cfg.state_path))
-        print(f">>> Session saved to {cfg.state_path}", file=sys.stderr)
+        _notify(f">>> Session saved to {cfg.state_path}")
         browser.close()
 
 
