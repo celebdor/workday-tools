@@ -21,6 +21,7 @@ from . import gcal
 from .config import Config
 
 CALENDAR_API = "calendar-json.googleapis.com"
+DOCS_API = "docs.googleapis.com"  # for the Quarterly Connections (`qc-*`) commands
 
 
 def _run(args: list[str], *, capture: bool = False) -> subprocess.CompletedProcess:
@@ -99,9 +100,12 @@ def _choose_project() -> str:
     return project
 
 
-def _enable_calendar_api(project: str) -> None:
-    print(f"Enabling {CALENDAR_API} on {project} …")
-    _run(["gcloud", "services", "enable", CALENDAR_API, f"--project={project}"])
+def _enable_apis(project: str) -> None:
+    # Calendar (absence sync) and Docs (Quarterly Connections) — enabling both is
+    # cheap, so a later `qc-sync` works without re-running setup. The Docs OAuth
+    # consent itself runs on demand the first time `qc-sync` needs it.
+    print(f"Enabling {CALENDAR_API} and {DOCS_API} on {project} …")
+    _run(["gcloud", "services", "enable", CALENDAR_API, DOCS_API, f"--project={project}"])
 
 
 def _open(url: str) -> None:
@@ -166,11 +170,15 @@ def run(cfg: Config) -> int:
     print(f"gcloud account: {_active_account()}")
     project = _choose_project()
     _run(["gcloud", "config", "set", "project", project])
-    _enable_calendar_api(project)
+    _enable_apis(project)
     _ensure_client_json(cfg, project)
 
     print("\nAuthorizing — a browser window will open for Google consent …")
     gcal.authorize(cfg)  # runs the installed-app flow, writes token.json
     print(gcal.check_calendar_access(cfg))
     print("\nGoogle setup complete. You can now run `wdtools sync`.")
+    print(
+        "For Quarterly Connections (`wdtools qc-sync`), the Docs API is enabled; a "
+        "one-time Google consent for Docs runs the first time you use it."
+    )
     return 0

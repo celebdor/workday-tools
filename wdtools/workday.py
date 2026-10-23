@@ -26,7 +26,6 @@ Calendar" feed on this view, that is far more stable than scraping — see READM
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections import defaultdict
@@ -36,6 +35,7 @@ from typing import Iterator
 
 from playwright.sync_api import BrowserContext, Page, Response
 
+from ._capture import NetworkCapture
 from .config import Config
 from .models import AbsenceEvent
 
@@ -103,112 +103,8 @@ def _run_prompt(page: Page) -> None:
         ok.click()
 
 
-class _NetworkCapture:
-    """Collect XHR/fetch responses seen while the calendar loads.
-
-    We only hold lightweight request metadata plus the live ``Response`` object
-    during load; bodies are read later (``dump``), while we're still parked on the
-    calendar page so Playwright can still serve them.
-    """
-
-    def __init__(self) -> None:
-        self._entries: list[dict] = []
-
-    def attach(self, page: Page) -> None:
-        page.on("response", self._on_response)
-
-    def _on_response(self, response: Response) -> None:
-        # This runs inside Playwright's event loop; an exception here poisons the
-        # connection and breaks later page calls, so never let one escape.
-        try:
-            req = response.request
-            if req.resource_type not in ("xhr", "fetch"):
-                return
-            self._entries.append(
-                {
-                    "url": response.url,
-                    "status": response.status,
-                    "method": req.method,
-                    "resource_type": req.resource_type,
-                    "content_type": (response.headers or {}).get("content-type", ""),
-                    "post_data": _safe_post_data(req),
-                    "_response": response,
-                }
-            )
-        except Exception:
-            pass
-
-    def json_payloads(self) -> Iterator[dict]:
-        """Parsed JSON bodies of every captured response (unparseable ones skipped).
-
-        Entry extraction scans all of them — month navigation loads its data
-        through an endpoint we don't try to name, so filtering by URL could drop it.
-        """
-        for entry in self._entries:
-            response = entry.get("_response")
-            if response is None:
-                continue
-            try:
-                yield json.loads(response.text())
-            except Exception:
-                continue
-
-    def response_summary(self) -> str:
-        """Short description of what was captured, for diagnostics on failure."""
-        total = len(self._entries)
-        cal = sum(1 for e in self._entries if _is_calendar_url(e.get("url", "")))
-        return f"{total} XHR/fetch response(s) captured, {cal} from calendar URLs"
-
-    def dump(self, out_dir: Path, stamp: str) -> Path:
-        """Write captured JSON responses + an index. Returns the index path."""
-        index: list[dict] = []
-        for i, entry in enumerate(self._entries):
-            response: Response = entry.pop("_response")
-            ctype = entry["content_type"].lower()
-            # Keep anything that looks like structured data; Workday often serves
-            # JSON without a clean content-type, so sniff the body too.
-            try:
-                body = response.text()
-            except Exception:
-                body = None
-            looks_json = "json" in ctype or (
-                body is not None and body.lstrip()[:1] in ("{", "[")
-            )
-            if not body or not looks_json:
-                continue
-            fname = f"absence-{stamp}-xhr-{i:03d}-{_slug(entry['url'])}.json"
-            (out_dir / fname).write_text(body, encoding="utf-8")
-            index.append({**entry, "bytes": len(body), "file": fname})
-
-        index_path = out_dir / f"absence-{stamp}-xhr-index.json"
-        index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
-        return index_path
-
-
-def _safe_post_data(request) -> str | None:
-    """Request body as text, without Playwright's utf-8-only ``post_data``.
-
-    Workday POSTs binary bodies; ``request.post_data`` decodes base64 as strict
-    utf-8 and raises on them. Read the raw buffer and decode leniently instead.
-    """
-    try:
-        raw = request.post_data_buffer
-    except Exception:
-        return None
-    if not raw:
-        return None
-    return raw.decode("utf-8", "replace")
-
-
-def _slug(url: str) -> str:
-    """A short, filesystem-safe hint derived from a URL's path tail."""
-    path = re.sub(r"https?://[^/]+", "", url).split("?", 1)[0]
-    tail = "-".join(p for p in path.split("/") if p)[-60:]
-    return re.sub(r"[^A-Za-z0-9._-]", "_", tail) or "root"
-
-
 def _open_calendar(
-    context: BrowserContext, cfg: Config, capture: _NetworkCapture | None = None
+    context: BrowserContext, cfg: Config, capture: NetworkCapture | None = None
 ) -> Page:
     page = context.new_page()
     if capture is not None:
@@ -251,7 +147,7 @@ def snapshot(
     DOM until it's opened.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    capture = _NetworkCapture()
+    capture = NetworkCapture()
     page = _open_calendar(context, cfg, capture=capture)
     if open_view_menu:
         _open_view_menu(page)
@@ -260,7 +156,7 @@ def snapshot(
     png_path = out_dir / f"absence-{stamp}.png"
     html_path.write_text(page.content(), encoding="utf-8")
     page.screenshot(path=str(png_path), full_page=True)
-    capture.dump(out_dir, stamp)
+    capture.dump(out_dir, stamp, prefix="absence")
     return html_path
 
 
@@ -529,7 +425,7 @@ def _click_nav(page: Page, selector: str) -> bool:
     return True
 
 
-def _page_through_window(page: Page, cfg: Config, capture: _NetworkCapture) -> None:
+def _page_through_window(page: Page, cfg: Config, capture: NetworkCapture) -> None:
     """Page across the sync window a month at a time so every month is captured.
 
     In Month view each click is exactly one month, so we step deterministically:
@@ -555,7 +451,7 @@ def _page_through_window(page: Page, cfg: Config, capture: _NetworkCapture) -> N
 
 
 def scrape_absences(context: BrowserContext, cfg: Config) -> list[AbsenceEvent]:
-    capture = _NetworkCapture()
+    capture = NetworkCapture()
     page = _open_calendar(context, cfg, capture=capture)
     _page_through_window(page, cfg, capture)
 

@@ -5,14 +5,18 @@ or structure changes.
 
 ## What this is
 
-`wdtools` scrapes the Workday **Team Absence Calendar** and syncs it into a shared
-**Google Calendar** (one-way: Workday → Google). CLI entrypoint `wdtools`
-(`python -m wdtools`).
+`wdtools` is a pair of one-way Workday → Google utilities (CLI entrypoint
+`wdtools` / `python -m wdtools`):
+
+1. scrape the Workday **Team Absence Calendar** → shared **Google Calendar**.
+2. scrape **Quarterly Connection** reviews from Workday **My Tasks** → a shared
+   **Google Doc** (the `qc-*` commands).
 
 ## Layout
 
 - `wdtools/__main__.py` — CLI: `init`, `login`, `setup-google`, `snapshot`,
-  `scrape`, `sync`, `tray`. Sets up logging (`-v`/`-vv`).
+  `scrape`, `sync`, `qc-snapshot`, `qc-scrape`, `qc-sync`, `tray`. Sets up logging
+  (`-v`/`-vv`).
 - `wdtools/config.py` — `config.toml` loading; XDG dirs; `init` template; a
   `-vv` config dump box.
 - `wdtools/auth.py` — Workday session via Playwright (interactive login once,
@@ -20,8 +24,17 @@ or structure changes.
 - `wdtools/workday.py` — open the prompted calendar, switch to Month view, page
   month-by-month, parse the `flowController` JSON into `AbsenceEvent`s.
 - `wdtools/gcal.py` — idempotent reconcile into Google Calendar.
-- `wdtools/google_setup.py` — `setup-google`: gcloud project/API + OAuth consent.
-- `wdtools/models.py` — `AbsenceEvent` + its stable `wdKey` identity.
+- `wdtools/qc.py` — scrape Quarterly Connections from My Tasks (navigate task →
+  Get Started → evaluation sections), plus a `qc-snapshot` for selector dev.
+- `wdtools/gdocs.py` — write Quarterly Connections into a Google Doc's per-quarter
+  tabs (idempotent per employee; never clobbers manager responses).
+- `wdtools/richtext.py` — translate Workday rich-text HTML (bold/italic/links/bullets)
+  into paragraphs/runs for the Docs writer.
+- `wdtools/_capture.py` — shared XHR/fetch capture helper used by both snapshots.
+- `wdtools/google_setup.py` — `setup-google`: gcloud project + Calendar/Docs APIs +
+  OAuth consent.
+- `wdtools/models.py` — `AbsenceEvent` (+ stable `wdKey`) and the
+  `QuarterlyConnection`/`QCSection`/`QCQuestion` models.
 - `wdtools/trayapp.py` — menu-bar/tray scheduler.
 - `specs/` — design docs (see below).
 
@@ -34,6 +47,10 @@ spec before changing that area, and update it when you change the behavior.
   identifies, and reconciles events (ownership tag, `wdKey`, three-way diff,
   windowing, safety properties). **Read before touching `gcal.py` or
   `AbsenceEvent.key`.**
+- [`specs/quarterly-connections.md`](specs/quarterly-connections.md) — the My Tasks
+  → task → sections scrape, the `YEARQX QC` tab mapping, the doc layout, and the
+  "tabs can't be created via the API / never overwrite manager responses"
+  constraints. **Read before touching `qc.py` or `gdocs.py`.**
 
 ## Key design points
 
@@ -46,6 +63,15 @@ spec before changing that area, and update it when you change the behavior.
   into contiguous-day events. Selectors are tenant-specific; re-derive via
   `wdtools snapshot` (add `--open-view-menu` to capture the interval dropdown).
 - **Reconciliation** (`gcal.py`): see the spec. Never touch untagged events.
+- **Quarterly Connections** (`qc.py` / `gdocs.py`): see the spec. Discovery parses
+  the inbox `queryTasks` JSON (employee/quarter/task-URI); the editor is a task
+  wizard read via `verticalNavigationItem` (sections) + `richTextContent` (question,
+  associate answer). Selectors are tenant-specific — re-derive from `qc-snapshot`
+  output if they differ. The Google Docs API **cannot create tabs**, so the
+  per-quarter `YEARQX QC` tabs are created by hand; the tool fills existing tabs and
+  skips any employee already present (never overwriting manager responses). Scraped
+  connections are cached in the state dir (`qc_cache.json`); `--refresh` re-scrapes,
+  `--offline` works purely from the cache.
 - **Config/state/log dirs** (`config.py`): config + `credentials.json` in the
   config dir (`XDG_CONFIG_HOME`/`~/.config`); session + `token.json` in the state
   dir (`XDG_STATE_HOME`/`~/.local/state`); macOS uses Application Support for both.

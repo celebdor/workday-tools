@@ -185,6 +185,48 @@ including third-party libraries — handy for watching a long sync or diagnosing
 wdtools sync --dry-run -v
 ```
 
+## Quarterly Connections → Google Doc
+
+A second utility scrapes **Quarterly Connection** reviews from Workday **My Tasks**
+and writes each associate's answers into a shared **Google Doc**, so you can add
+your manager responses alongside them. It shares the Workday session and Google
+OAuth client with the absence sync; see
+[`specs/quarterly-connections.md`](specs/quarterly-connections.md) for the full
+design.
+
+Prerequisites:
+
+- Fill in the `[talent]` section of `config.toml` (`my_tasks_url` and the target
+  `doc_id`).
+- **Create the per-quarter tabs by hand** in that doc, named `YEARQX QC`
+  (e.g. `2026Q1 QC`; Q1 Jan–Mar … Q4 Oct–Dec). The Google Docs API cannot create
+  tabs, so the tool only *fills* tabs that already exist.
+- Run `wdtools setup-google` (it enables the Docs API; a one-time Docs consent runs
+  the first time you `qc-sync`).
+
+```bash
+# Capture the My Tasks + task pages to wire up selectors (see "Adapting" below).
+# --task N also opens the Nth Quarterly Connection task and snapshots its sections.
+wdtools qc-snapshot --task 1
+
+# Scrape and print the connections without writing anything
+wdtools qc-scrape
+
+# Write into the Google Doc (idempotent; skips employees already present)
+wdtools qc-sync          # add --dry-run to preview
+```
+
+Scraped answers are cached in the state dir (they don't change once the associate
+submits). `qc-scrape` / `qc-sync` reuse cached tasks and only scrape new ones; add
+`--refresh` to re-scrape everything, or `--offline` to skip Workday entirely and work
+from the cache (fast when iterating on the Doc output). Use `--replace` to rewrite an
+employee already in the tab — it preserves their "Manager Response" section.
+
+Add `--headful` to any `qc-*` command to watch it drive a visible browser while you
+finalize selectors. Writing is **non-destructive**: an employee already present in a
+tab is skipped, so a manager's typed responses are never overwritten and re-runs
+never duplicate.
+
 ## Adapting to another Workday tenant
 
 The scraper (`wdtools/workday.py`) is wired against one specific Workday tenant: it dismisses
@@ -202,6 +244,11 @@ and obfuscated, so another tenant may need the selectors or parsing adjusted.
 **Shortcut worth checking first:** some Workday tenants expose an iCal /
 "Export to Calendar" / "Subscribe" link on time-off views. If yours does, that
 feed is far more stable than scraping — parsing it instead is worth it.
+
+The same applies to the Quarterly Connections scraper (`wdtools/qc.py`): its
+`SELECTORS` are tenant-specific and seeded as `# TODO` best guesses. Use
+`wdtools qc-snapshot --task 1` to capture the inbox and a task's section pages, then
+finalize the selectors and the question/answer parsing from that output.
 
 ## Scheduling
 
