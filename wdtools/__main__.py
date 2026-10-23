@@ -189,6 +189,12 @@ def cmd_qc_scrape(args) -> int:
     connections = _qc_connections(args, cfg)
     for c in connections:
         print(f"\n# {c.employee}  [{c.tab_name}]  (period: {c.period_label!r})")
+        if c.previous is not None:
+            mgr = "yes" if c.previous.manager_html.strip() else "no"
+            assoc = "yes" if c.previous.associate_html.strip() else "no"
+            print(f"  (previous {c.previous.label}: manager={mgr}, associate={assoc})")
+        else:
+            print("  (previous priorities: none found)")
         for section in c.sections:
             print(f"  ## {section.name}")
             for q in section.questions:

@@ -36,9 +36,10 @@ The My Tasks inbox lists a task per review titled `Quarterly Connection: <Employ
    (`SKIP_SECTIONS`), and for each section pairs the read-only rich-text blocks
    (`data-automation-id='richTextContent'`) two-by-two as (question, associate
    answer). The manager's own answer box is an empty `richTextContent` and is
-   dropped.
+   dropped;
+4. captures the **previous** quarter's Priorities (see Previous priorities below).
 
-**Tenant-specific selectors.** The above was wired against a real Red Hat tenant
+**Tenant-specific selectors.** The above was wired against one real tenant's
 capture. On another tenant, re-derive with `wdtools qc-snapshot --task 1`, which
 dumps the inbox, the task overview, the editor, each embedded frame, and the
 embedded form as HTML + screenshots + captured XHR/JSON/document responses (shared
@@ -60,11 +61,34 @@ missing tab is a hard error that lists the tabs that do exist.
 Within the quarter tab, appended at the end of the tab body:
 
 - `Heading 1` — employee name
+- `Heading 2` — **Previous Priorities (YYYYQn)** followed by a 2-column table: a
+  header row (`Manager-set priorities` | `Associate-set priorities`) and a content row
+  with each column's formatted text (empty cells when no prior QC was found). Built by
+  `_write_employee` (structural `insertTable` + cell fills; see Previous priorities).
 - the associate's content: per section `Heading 2` — section name; per question
   `Heading 3` — question text, then the associate's answer as **formatted body**.
 - a dedicated `Heading 2` — **Manager Response** section, with a `Heading 3` per
   associate section and an empty paragraph beneath each for the manager to type into.
   This section is kept separate so `--replace` can preserve it (see below).
+
+### Previous priorities
+
+The prior quarter's Priorities are carried over from the associate's last completed
+Quarterly Connection. Read side (`_fetch_previous_priorities` in `qc.py`), per task:
+click the task-wizard instance moniker → the event view; click the associate's
+related-actions (`relatedIconContainer[aria-label='Related Actions <name>']`), whose
+menu loads a rel-tasks JSON; take its **View Associate Reviews** `relatedTask` uri →
+the Completed grid JSON; `_review_rows` + `_pick_previous_review` choose the most
+recent review whose end date precedes the current quarter; open that review's **View**
+uri → the summary, where `_read_priorities_columns` returns the Priorities section's
+(Manager, Associate) column HTML. Each hop uses a captured JSON uri (no fragile menu
+clicking); a fresh capture per employee prevents cross-contamination. The result is
+cached with the connection.
+
+Write side renders it as the table above; `insertTable` is a structural op, so
+`_write_employee` writes in ordered batches (heading → table → cell fills in
+descending index order → associate sections → Manager Response), re-fetching to learn
+cell indices.
 
 **Rich-text answers.** The associate's answer is captured as HTML and translated by
 [`wdtools/richtext.py`](../wdtools/richtext.py) (`html_to_paras`) into paragraphs and

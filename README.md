@@ -216,6 +216,10 @@ wdtools qc-scrape
 wdtools qc-sync          # add --dry-run to preview
 ```
 
+Each employee's block starts with a **Previous Priorities** table (the manager and
+associate priorities carried over from their last completed Quarterly Connection),
+followed by this quarter's sections and a separate **Manager Response** section.
+
 Scraped answers are cached in the state dir (they don't change once the associate
 submits). `qc-scrape` / `qc-sync` reuse cached tasks and only scrape new ones; add
 `--refresh` to re-scrape everything, or `--offline` to skip Workday entirely and work

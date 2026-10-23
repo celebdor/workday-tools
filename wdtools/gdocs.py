@@ -187,13 +187,29 @@ def _manager_section_start(tab: dict, employee: str) -> int | None:
 # --- Building the insert for one connection --------------------------------
 
 
-def _associate_paras(qc: QuarterlyConnection) -> list[Para]:
-    """The associate's half of an employee block: H1 name + sections/questions/answers.
+HEADER_MANAGER = "Manager-set priorities"
+HEADER_ASSOCIATE = "Associate-set priorities"
+
+
+def _previous_quarter(year: int, quarter: int) -> tuple[int, int]:
+    return (year, quarter - 1) if quarter > 1 else (year - 1, 4)
+
+
+def _previous_title(qc: QuarterlyConnection) -> str:
+    if qc.previous is not None:
+        y, q = qc.previous.year, qc.previous.quarter
+    else:
+        y, q = _previous_quarter(qc.year, qc.quarter)
+    return f"Previous Priorities ({y}Q{q})"
+
+
+def _section_paras(qc: QuarterlyConnection) -> list[Para]:
+    """The associate's sections/questions/answers (no H1).
 
     Each answer is translated from its rich-text HTML (bold/italic/links/bullets
     preserved), falling back to plain text.
     """
-    paras: list[Para] = [Para(runs=[Run(qc.employee)], style="HEADING_1")]
+    paras: list[Para] = []
     for section in qc.sections:
         paras.append(Para(runs=[Run(section.name)], style="HEADING_2"))
         for q in section.questions:
@@ -214,42 +230,40 @@ def _manager_paras(qc: QuarterlyConnection) -> list[Para]:
     return paras
 
 
-def _paras(qc: QuarterlyConnection, include_manager: bool = True) -> list[Para]:
-    """Full employee block: associate content, then (optionally) the Manager Response.
-
-    ``include_manager=False`` is used when re-importing over an employee whose Manager
-    Response section already exists and must be preserved.
-    """
-    paras = _associate_paras(qc)
-    if include_manager:
-        paras.extend(_manager_paras(qc))
-    return paras
-
-
 def _range(start: int, end: int, tab_id: str) -> dict:
     return {"startIndex": start, "endIndex": end, "tabId": tab_id}
 
 
-def _build_requests(tab_id: str, start: int, paras: list[Para]) -> list[dict]:
+def _build_requests(
+    tab_id: str, start: int, paras: list[Para], trailing_newline: bool = True
+) -> list[dict]:
     """batchUpdate requests to insert ``paras`` at ``start`` within ``tab_id``.
 
-    One InsertText with the whole blob (each paragraph newline-terminated), then a
-    paragraph-style request per paragraph, a text-style request per emphasized/linked
-    run, and a createParagraphBullets per run of consecutive bullet paragraphs. All
-    offsets are deterministic from the known insert point and text.
+    One InsertText with the whole blob, then a paragraph-style request per paragraph,
+    a text-style request per emphasized/linked run, and a createParagraphBullets per
+    run of consecutive bullet paragraphs. All offsets are deterministic from the known
+    insert point and text.
+
+    With ``trailing_newline=False`` (for table cells) the final paragraph gets no
+    inserted newline — it borrows the cell's own structural newline as its terminator,
+    avoiding a spurious blank line in the cell.
     """
-    text = "".join(p.text + "\n" for p in paras)
+    if trailing_newline:
+        text = "".join(p.text + "\n" for p in paras)
+    else:
+        text = "\n".join(p.text for p in paras)
     requests: list[dict] = [
         {"insertText": {"location": {"index": start, "tabId": tab_id}, "text": text}}
     ]
 
-    # Per-paragraph [start, end) ranges (end includes the trailing newline).
+    # Per-paragraph [start, end) ranges (end always includes a terminating newline —
+    # inserted, or, for the last para when trailing_newline is False, the structural one).
     ranges: list[tuple[int, int]] = []
     cursor = start
-    for p in paras:
-        seg_len = len(p.text) + 1
-        ranges.append((cursor, cursor + seg_len))
-        cursor += seg_len
+    last = len(paras) - 1
+    for i, p in enumerate(paras):
+        ranges.append((cursor, cursor + len(p.text) + 1))
+        cursor += len(p.text) + (1 if (trailing_newline or i < last) else 0)
 
     for p, (s, e) in zip(paras, ranges):
         requests.append(
@@ -306,6 +320,95 @@ def _build_requests(tab_id: str, start: int, paras: list[Para]) -> list[dict]:
         else:
             i += 1
     return requests
+
+
+# --- Table (previous priorities) -------------------------------------------
+
+
+def _find_table_after(tab: dict, index: int) -> dict | None:
+    """The first table structural element at or after ``index`` in the tab body."""
+    body = (tab.get("documentTab", {}) or {}).get("body", {}) or {}
+    for el in body.get("content", []):
+        if "table" in el and el.get("startIndex", -1) >= index:
+            return el
+    return None
+
+
+def _cell_content_starts(table_el: dict) -> list[list[int]]:
+    """Content start index of each cell, as [[r0c0, r0c1], [r1c0, r1c1]]."""
+    out: list[list[int]] = []
+    for row in table_el["table"]["tableRows"]:
+        out.append([cell["content"][0]["startIndex"] for cell in row["tableCells"]])
+    return out
+
+
+def _write_employee(
+    service,
+    doc_id: str,
+    tab_name: str,
+    tab_id: str,
+    start: int,
+    qc: QuarterlyConnection,
+    include_manager: bool,
+) -> None:
+    """Write one employee's block at ``start``: heading, previous-priorities table, then
+    the associate sections and (optionally) the Manager Response section.
+
+    Done in ordered batches with re-fetches, because the table is a structural element
+    whose cell indices are only known after it's inserted.
+    """
+
+    def b(reqs: list[dict]) -> None:
+        if reqs:
+            service.documents().batchUpdate(
+                documentId=doc_id, body={"requests": reqs}
+            ).execute()
+
+    def g() -> dict:
+        return service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
+
+    # 1. Heading block before the table (H1 employee, H2 "Previous Priorities (...)").
+    pre = [
+        Para(runs=[Run(qc.employee)], style="HEADING_1"),
+        Para(runs=[Run(_previous_title(qc))], style="HEADING_2"),
+    ]
+    b(_build_requests(tab_id, start, pre))
+    table_index = start + sum(len(p.text) + 1 for p in pre)
+
+    # 2. Insert the empty 2x2 table.
+    b([{"insertTable": {"rows": 2, "columns": 2,
+                        "location": {"index": table_index, "tabId": tab_id}}}])
+
+    # 3. Fill the cells. Headers always; content cells only when we have previous data.
+    tab = find_tab(g(), tab_name)
+    table_el = _find_table_after(tab, table_index)
+    cells: list[tuple[int, list[Para]]] = []
+    if table_el:
+        starts = _cell_content_starts(table_el)
+        cells.append((starts[0][0], [Para(runs=[Run(HEADER_MANAGER, bold=True)])]))
+        cells.append((starts[0][1], [Para(runs=[Run(HEADER_ASSOCIATE, bold=True)])]))
+        if qc.previous and qc.previous.manager_html.strip():
+            mp = html_to_paras(qc.previous.manager_html)
+            if mp:
+                cells.append((starts[1][0], mp))
+        if qc.previous and qc.previous.associate_html.strip():
+            ap = html_to_paras(qc.previous.associate_html)
+            if ap:
+                cells.append((starts[1][1], ap))
+        # Fill highest index first so earlier cells' indices stay valid.
+        reqs: list[dict] = []
+        for cstart, cparas in sorted(cells, key=lambda c: -c[0]):
+            reqs += _build_requests(tab_id, cstart, cparas, trailing_newline=False)
+        b(reqs)
+
+    # 4. Associate sections + optional Manager Response section, after the table.
+    tab = find_tab(g(), tab_name)
+    table_el = _find_table_after(tab, table_index)
+    post_index = table_el["endIndex"] if table_el else table_index
+    post = _section_paras(qc)
+    if include_manager:
+        post += _manager_paras(qc)
+    b(_build_requests(tab_id, post_index, post))
 
 
 # --- Sync ------------------------------------------------------------------
@@ -405,12 +508,14 @@ def sync(
             tab_id = tab["tabProperties"]["tabId"]
             start = s  # rewrite in place where the old block began
 
-        requests = _build_requests(tab_id, start, _paras(qc, include_manager=include_manager))
         verb = "replace" if replacing else "create"
-        logger.info("%s%s: %s -> tab %s (%d section(s))",
-                    tag, verb, qc.employee, qc.tab_name, len(qc.sections))
+        logger.info("%s%s: %s -> tab %s (%d section(s), previous=%s)",
+                    tag, verb, qc.employee, qc.tab_name, len(qc.sections),
+                    qc.previous.label if qc.previous else "none")
         if not dry_run:
-            _batch(requests)
+            _write_employee(
+                service, cfg.talent_doc_id, qc.tab_name, tab_id, start, qc, include_manager
+            )
         written.add(marker)
         if replacing:
             result.replaced += 1

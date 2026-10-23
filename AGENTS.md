@@ -66,8 +66,12 @@ spec before changing that area, and update it when you change the behavior.
 - **Quarterly Connections** (`qc.py` / `gdocs.py`): see the spec. Discovery parses
   the inbox `queryTasks` JSON (employee/quarter/task-URI); the editor is a task
   wizard read via `verticalNavigationItem` (sections) + `richTextContent` (question,
-  associate answer). Selectors are tenant-specific — re-derive from `qc-snapshot`
-  output if they differ. The Google Docs API **cannot create tabs**, so the
+  associate answer). Each employee's block also starts with a **Previous Priorities**
+  table carried from their last completed QC (instance moniker → event view → associate
+  related-actions menu JSON → View Associate Reviews grid → previous summary; rendered
+  with structural `insertTable` in `_write_employee`). Selectors are tenant-specific —
+  re-derive from `qc-snapshot` output if they differ. The Google Docs API **cannot
+  create tabs**, so the
   per-quarter `YEARQX QC` tabs are created by hand; the tool fills existing tabs and
   skips any employee already present (never overwriting manager responses). Scraped
   connections are cached in the state dir (`qc_cache.json`); `--refresh` re-scrapes,

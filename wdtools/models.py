@@ -91,11 +91,30 @@ class QCSection:
 
 
 @dataclass(frozen=True)
+class PreviousPriorities:
+    """The previous quarter's Priorities, as two rich-text (HTML) columns.
+
+    Captured from the associate's prior completed Quarterly Connection; rendered as a
+    table at the top of the employee's block so the carryover is visible.
+    """
+
+    year: int
+    quarter: int
+    manager_html: str = ""
+    associate_html: str = ""
+
+    @property
+    def label(self) -> str:
+        return f"{self.year}Q{self.quarter}"
+
+
+@dataclass(frozen=True)
 class QuarterlyConnection:
     """One employee's Quarterly Connection, normalized from the Workday task.
 
     ``year``/``quarter`` come from the review period and name the target Google Doc
     tab (``tab_name``); ``period_label`` keeps Workday's raw text for diagnostics.
+    ``previous`` carries the prior quarter's Priorities (None if none was found).
     """
 
     employee: str
@@ -103,6 +122,7 @@ class QuarterlyConnection:
     quarter: int
     sections: tuple[QCSection, ...]
     period_label: str = ""
+    previous: "PreviousPriorities | None" = None
 
     @property
     def tab_name(self) -> str:

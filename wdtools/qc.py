@@ -17,7 +17,7 @@ except "Review and Submit" holds question(s) with the associate's answer.
 Tenant note
 -----------
 Both the discovery (``queryTasks`` JSON) and the editor extraction (the task-wizard
-left rail + read-only rich-text blocks) were wired against a real Red Hat tenant
+left rail + read-only rich-text blocks) were wired against one real tenant's
 capture. If the markup differs on another tenant, re-capture with
 ``wdtools qc-snapshot --task 1`` (it navigates overview → Get Started, dumps the
 editor plus each frame, and follows the embedded form) and adjust ``SELECTORS``.
@@ -29,7 +29,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -39,7 +39,13 @@ from playwright.sync_api import BrowserContext, Page
 
 from ._capture import NetworkCapture
 from .config import Config
-from .models import QCQuestion, QCSection, QuarterlyConnection, quarter_for
+from .models import (
+    PreviousPriorities,
+    QCQuestion,
+    QCSection,
+    QuarterlyConnection,
+    quarter_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +58,7 @@ NAV_TIMEOUT_MS = 15_000
 # "data" is a list of unified-task entries. Each Quarterly Connection entry carries:
 #   unifiedTaskMetadata.appliedSystemTags.TITLE.value          -> "Quarterly Connection: <Employee>"
 #   unifiedTaskMetadata.appliedSystemTags.EFFECTIVE_DATE.value -> "YYYY-MM-DD" (period end)
-#   unifiedTaskModel.taskExecutor.taskToExecute.uri            -> "/redhat/d/inst/…/rel-task/…​.htmld"
+#   unifiedTaskModel.taskExecutor.taskToExecute.uri            -> "/<tenant>/d/inst/…/rel-task/…​.htmld"
 
 QC_TITLE_RE = re.compile(r"Quarterly Connection:\s*(?P<name>.+)", re.I)
 # The guided editor's left-rail section we never read (it's the submit step).
@@ -65,6 +71,8 @@ SKIP_SECTIONS = {"review and submit"}
 SELECTORS = {
     "get_started": "[data-automation-id='wd-CommandButton']:has-text('Get Started'), "
     "button:has-text('Get Started')",
+    # The task-wizard instance moniker (its label button navigates to the event view).
+    "instance_label": "[data-automation-id='taskWizardInstanceLabel']",
     "section_nav_item": "[data-automation-id='verticalNavigationItem']",
     # Read-only rich text = question + associate answer (the manager's own answer box
     # is the editable ProseMirror, contenteditable='true', which we exclude here).
@@ -186,8 +194,8 @@ def _abs(cfg: Config, uri: str) -> str:
 def _to_htmld(uri: str) -> str:
     """Convert a mobile-style task uri to its desktop ``/d/…​.htmld`` form.
 
-    e.g. ``/redhat/inst/1007$641183/rel-task/2998$40105`` ->
-         ``/redhat/d/inst/1007$641183/rel-task/2998$40105.htmld``
+    e.g. ``/<tenant>/inst/1007$641183/rel-task/2998$40105`` ->
+         ``/<tenant>/d/inst/1007$641183/rel-task/2998$40105.htmld``
     """
     if uri.endswith(".htmld"):
         return uri
@@ -229,6 +237,185 @@ def _find_get_started_uri(capture: NetworkCapture) -> str | None:
 def _find_embedded_uri(capture: NetworkCapture) -> str | None:
     """The task-wizard embeddedEdit uri (the form holding the associate's answers)."""
     return _find_widget_uri(capture, lambda n: n.get("widget") == "embeddedEdit")
+
+
+def _find_related_task_uri(capture: NetworkCapture, label: str) -> str | None:
+    """URI of a related-task action (e.g. 'View Associate Reviews') from a rel-tasks menu."""
+    want = label.strip().lower()
+    return _find_widget_uri(
+        capture,
+        lambda n: n.get("widget") == "relatedTask"
+        and (n.get("label") or "").strip().lower() == want,
+    )
+
+
+def _parse_grid_date(cell: dict) -> date | None:
+    """A grid date cell -> date (handles MM/DD/YYYY ``text`` and a {Y,M,D} ``value``)."""
+    t = cell.get("text")
+    if isinstance(t, str):
+        m = re.match(r"(\d{2})/(\d{2})/(\d{4})", t)
+        if m:
+            return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    val = cell.get("value")
+    if isinstance(val, dict) and val.get("Y"):
+        try:
+            return date(int(val["Y"]), int(val["M"]), int(val["D"]))
+        except (KeyError, ValueError, TypeError):
+            return None
+    return None
+
+
+def _review_rows(capture: NetworkCapture) -> list[dict]:
+    """Parse the Associate Reviews grid into rows {name, start, end, view_uri}.
+
+    Cells carry ``label``s, so we key off those: the "Review" monikerList (name),
+    the "Review Period Start/End Date" date cells, and the "View" commandButton
+    (its uri is the review summary). Only "Quarterly Connection" rows are kept.
+    """
+    rows: list[dict] = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            if node.get("widget") == "row" and isinstance(node.get("cellsMap"), dict):
+                name = None
+                start = end = None
+                extra_dates: list[date] = []
+                view = None
+                for cell in node["cellsMap"].values():
+                    if not isinstance(cell, dict):
+                        continue
+                    label = (cell.get("label") or "").strip().lower()
+                    widget = cell.get("widget")
+                    if widget == "monikerList":
+                        for ins in cell.get("instances") or []:
+                            t = ins.get("text")
+                            if isinstance(t, str) and t.startswith("Quarterly Connection"):
+                                name = t
+                    elif widget == "date":
+                        d = _parse_grid_date(cell)
+                        if d:
+                            if "end" in label:
+                                end = d
+                            elif "start" in label:
+                                start = d
+                            else:
+                                extra_dates.append(d)
+                    elif widget == "commandButton" and label == "view":
+                        view = cell.get("uri")
+                if end is None and extra_dates:
+                    end = max(extra_dates)
+                if start is None and extra_dates:
+                    start = min(extra_dates)
+                if name and view and "/inst/" in view and "/rel-task/" in view:
+                    rows.append(
+                        {"name": name, "start": start, "end": end, "view_uri": view}
+                    )
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    for payload in capture.json_payloads():
+        walk(payload)
+    return rows
+
+
+def _pick_previous_review(rows: list[dict], current_start: date) -> dict | None:
+    """Most recent completed review whose end date is before ``current_start``."""
+    cands = [r for r in rows if r.get("end") and r["end"] < current_start]
+    return max(cands, key=lambda r: r["end"]) if cands else None
+
+
+def _quarter_start(year: int, quarter: int) -> date:
+    return date(year, (quarter - 1) * 3 + 1, 1)
+
+
+def _read_priorities_columns(page: Page) -> tuple[str, str] | None:
+    """On a review summary page, return (manager_html, associate_html) for Priorities.
+
+    The summary renders each section as read-only rich-text blocks in the order
+    [Question, Manager answer, Associate answer]; we find the Priorities question and
+    take the next two blocks' HTML.
+    """
+    blocks = [
+        ((el.inner_text() or "").strip(), el.inner_html() or "")
+        for el in page.query_selector_all(SELECTORS["rich_text_readonly"])
+    ]
+    for i, (text, _html) in enumerate(blocks):
+        low = text.lower()
+        if low.startswith("what") and "priorit" in low and i + 2 < len(blocks):
+            return blocks[i + 1][1], blocks[i + 2][1]  # (manager, associate)
+    return None
+
+
+def _fetch_previous_priorities(
+    page: Page, cfg: Config, ref: _TaskRef
+) -> PreviousPriorities | None:
+    """Navigate from the open editor to the associate's prior QC and read Priorities.
+
+    Chain: instance moniker → event view → associate related actions (menu JSON) →
+    View Associate Reviews (grid JSON) → previous review summary → Priorities columns.
+    Best-effort; returns None if any hop fails and no previous review is found. Uses a
+    fresh capture so one employee's grid/menu JSON can't leak into another's.
+    """
+    sub = NetworkCapture()
+    sub.attach(page)
+    try:
+        page.locator(SELECTORS["instance_label"]).first.click(timeout=NAV_TIMEOUT_MS)
+        _settle(page)
+    except Exception:
+        logger.warning("prev-priorities: could not open event view for %s", ref.employee)
+        return None
+
+    ra_sel = (
+        "[data-automation-id='relatedIconContainer']"
+        f"[aria-label='Related Actions {ref.employee}']"
+    )
+    try:
+        page.locator(ra_sel).first.click(timeout=NAV_TIMEOUT_MS)
+        page.wait_for_timeout(2000)
+        _settle(page)
+    except Exception:
+        logger.warning("prev-priorities: could not open related actions for %s", ref.employee)
+        return None
+
+    var_uri = _find_related_task_uri(sub, "View Associate Reviews")
+    if not var_uri:
+        logger.warning("prev-priorities: no 'View Associate Reviews' for %s", ref.employee)
+        return None
+    try:
+        page.goto(_abs(cfg, _to_htmld(var_uri)), wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        _settle(page)
+    except Exception:
+        logger.warning("prev-priorities: could not open associate reviews for %s", ref.employee)
+        return None
+
+    prev = _pick_previous_review(_review_rows(sub), _quarter_start(ref.year, ref.quarter))
+    if not prev:
+        logger.info("prev-priorities: no previous review for %s", ref.employee)
+        return None
+
+    pstart = prev.get("start") or prev.get("end")
+    year, quarter = pstart.year, quarter_for(pstart.month)
+    try:
+        page.goto(_abs(cfg, _to_htmld(prev["view_uri"])), wait_until="domcontentloaded")
+        page.wait_for_timeout(2500)
+        _settle(page)
+        page.wait_for_selector(SELECTORS["rich_text_readonly"], timeout=RENDER_SETTLE_MS)
+    except Exception:
+        logger.warning("prev-priorities: could not open previous summary for %s", ref.employee)
+        return PreviousPriorities(year=year, quarter=quarter)
+
+    cols = _read_priorities_columns(page)
+    if cols is None:
+        logger.warning("prev-priorities: Priorities columns not found for %s", ref.employee)
+        return PreviousPriorities(year=year, quarter=quarter)
+    logger.info("prev-priorities: captured %dQ%d for %s", year, quarter, ref.employee)
+    return PreviousPriorities(
+        year=year, quarter=quarter, manager_html=cols[0], associate_html=cols[1]
+    )
 
 
 def _settle(page: Page) -> None:
@@ -322,7 +509,7 @@ def _open_evaluation(
 
 
 def _qc_to_dict(qc: QuarterlyConnection) -> dict:
-    return {
+    d = {
         "employee": qc.employee,
         "year": qc.year,
         "quarter": qc.quarter,
@@ -338,14 +525,34 @@ def _qc_to_dict(qc: QuarterlyConnection) -> dict:
             for s in qc.sections
         ],
     }
+    if qc.previous is not None:
+        d["previous"] = {
+            "year": qc.previous.year,
+            "quarter": qc.previous.quarter,
+            "manager_html": qc.previous.manager_html,
+            "associate_html": qc.previous.associate_html,
+        }
+    return d
 
 
 def _qc_from_dict(d: dict) -> QuarterlyConnection:
+    prev = d.get("previous")
+    previous = (
+        PreviousPriorities(
+            year=int(prev["year"]),
+            quarter=int(prev["quarter"]),
+            manager_html=prev.get("manager_html", ""),
+            associate_html=prev.get("associate_html", ""),
+        )
+        if prev
+        else None
+    )
     return QuarterlyConnection(
         employee=d["employee"],
         year=int(d["year"]),
         quarter=int(d["quarter"]),
         period_label=d.get("period_label", ""),
+        previous=previous,
         sections=tuple(
             QCSection(
                 name=s["name"],
@@ -492,12 +699,14 @@ def scrape_quarterly_connections(
             for name in _section_names(page)
             if name.strip().lower() not in SKIP_SECTIONS
         ]
+        previous = _fetch_previous_priorities(page, cfg, ref)
         qc = QuarterlyConnection(
             employee=ref.employee,
             year=ref.year,
             quarter=ref.quarter,
             sections=tuple(sections),
             period_label=ref.period_label,
+            previous=previous,
         )
         connections.append(qc)
         cache[key] = _qc_to_dict(qc)
@@ -564,8 +773,71 @@ def snapshot(
                 # Give the embedded form time to load inside the wizard.
                 page.wait_for_timeout(4000)
                 _dump("editor")
+
+                # Event view first, while we're still on the editor (clicking the
+                # task-wizard instance moniker; a derived inst URL 404s). The
+                # embedded-form navigation below leaves the editor, so do this first.
+                logger.info("Clicking the instance moniker to open the event view.")
+                try:
+                    page.locator(SELECTORS["instance_label"]).first.click(timeout=NAV_TIMEOUT_MS)
+                    page.wait_for_timeout(3000)
+                    _settle(page)
+                    _dump("event-view")
+                except Exception:
+                    logger.warning("Could not open the event view via the instance moniker.")
+
+                # Associate's related-actions menu (the "For" row ellipsis) — its menu
+                # should list Talent → View Associate Reviews. Capture it so we can map
+                # that hop.
+                ra_sel = (
+                    "[data-automation-id='relatedIconContainer']"
+                    f"[aria-label='Related Actions {ref.employee}']"
+                )
+                logger.info("Opening associate related actions: %s", ref.employee)
+                try:
+                    page.locator(ra_sel).first.click(timeout=NAV_TIMEOUT_MS)
+                    page.wait_for_timeout(2500)
+                    _settle(page)
+                    _dump("assoc-related-actions")
+                except Exception:
+                    logger.warning("Could not open associate related actions for %s",
+                                   ref.employee)
+
+                # View Associate Reviews — its uri comes from the related-actions menu
+                # JSON (a relatedTask). Navigate there and dump the Completed table.
+                var_uri = _find_related_task_uri(capture, "View Associate Reviews")
+                if var_uri:
+                    logger.info("Opening View Associate Reviews: %s", var_uri)
+                    try:
+                        page.goto(_abs(cfg, _to_htmld(var_uri)), wait_until="domcontentloaded")
+                        page.wait_for_timeout(3000)
+                        _settle(page)
+                        _dump("associate-reviews")
+                    except Exception:
+                        logger.warning("Could not open View Associate Reviews %s", var_uri)
+
+                    # Previous QC summary — pick the most recent completed review before
+                    # this task's quarter and open its View uri (holds the Priorities).
+                    rows = _review_rows(capture)
+                    prev = _pick_previous_review(rows, _quarter_start(ref.year, ref.quarter))
+                    logger.info("Review rows: %d; previous: %s", len(rows),
+                                (prev or {}).get("view_uri"))
+                    if prev:
+                        try:
+                            page.goto(_abs(cfg, _to_htmld(prev["view_uri"])),
+                                      wait_until="domcontentloaded")
+                            page.wait_for_timeout(3000)
+                            _settle(page)
+                            _dump("previous-review")
+                        except Exception:
+                            logger.warning("Could not open previous review %s",
+                                           prev["view_uri"])
+                else:
+                    logger.warning("No 'View Associate Reviews' action found in the menu.")
+
                 # Follow the embeddedEdit uri directly so its form (the associate's
-                # answers) is captured even if it didn't render inline.
+                # answers) is captured even if it didn't render inline. Done last
+                # because it navigates away from the editor.
                 emb = _find_embedded_uri(capture)
                 if emb:
                     logger.info("Opening embeddedEdit directly: %s", emb)
