@@ -1,4 +1,4 @@
-"""Drive the Google side of setup: project, Calendar API, OAuth client, consent.
+"""Drive the Google side of setup: project, Calendar/Forms APIs, OAuth client, consent.
 
 Google exposes no API to create a classic OAuth 2.0 *Desktop app* client ID, so
 that one step (and downloading its JSON) stays manual in the Cloud Console. This
@@ -17,11 +17,12 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from . import gcal
+from . import gcal, optin
 from .config import Config
 
 CALENDAR_API = "calendar-json.googleapis.com"
 DOCS_API = "docs.googleapis.com"  # for the Quarterly Connections (`qc-*`) commands
+FORMS_API = "forms.googleapis.com"  # for the calendar-sync opt-in form responses
 
 
 def _run(args: list[str], *, capture: bool = False) -> subprocess.CompletedProcess:
@@ -101,11 +102,20 @@ def _choose_project() -> str:
 
 
 def _enable_apis(project: str) -> None:
-    # Calendar (absence sync) and Docs (Quarterly Connections) — enabling both is
-    # cheap, so a later `qc-sync` works without re-running setup. The Docs OAuth
-    # consent itself runs on demand the first time `qc-sync` needs it.
-    print(f"Enabling {CALENDAR_API} and {DOCS_API} on {project} …")
-    _run(["gcloud", "services", "enable", CALENDAR_API, DOCS_API, f"--project={project}"])
+    # Calendar (absence sync), Forms (opt-in responses), and Docs (Quarterly
+    # Connections) — enabling all is cheap, so later commands work without
+    # re-running setup. The Docs OAuth consent itself runs on demand the first
+    # time `qc-sync` needs it.
+    print(f"Enabling {CALENDAR_API}, {FORMS_API} and {DOCS_API} on {project} …")
+    _run([
+        "gcloud",
+        "services",
+        "enable",
+        CALENDAR_API,
+        FORMS_API,
+        DOCS_API,
+        f"--project={project}",
+    ])
 
 
 def _open(url: str) -> None:
@@ -166,6 +176,7 @@ def _ensure_client_json(cfg: Config, project: str) -> None:
 
 
 def run(cfg: Config) -> int:
+    cfg.validate_optin()
     _require_gcloud()
     print(f"gcloud account: {_active_account()}")
     project = _choose_project()
@@ -176,6 +187,22 @@ def run(cfg: Config) -> int:
     print("\nAuthorizing — a browser window will open for Google consent …")
     gcal.authorize(cfg)  # runs the installed-app flow, writes token.json
     print(gcal.check_calendar_access(cfg))
+    if cfg.optin_form_id:
+        print("\nAuthorizing Google Forms opt-in responses …")
+        optin.authorize(cfg)  # writes forms_token.json
+        print(optin.check_form_access(cfg))
+    else:
+        if cfg.optin_default == "opt_in":
+            print(
+                "\nNo [optin].form_id configured: calendar sync will treat everyone "
+                "as opted in by default."
+            )
+        else:
+            print(
+                "\nNo [optin].form_id configured: calendar sync will treat everyone "
+                "as opted out and remove existing workday-managed events inside the "
+                "sync window."
+            )
     print("\nGoogle setup complete. You can now run `wdtools sync`.")
     print(
         "For Quarterly Connections (`wdtools qc-sync`), the Docs API is enabled; a "

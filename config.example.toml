@@ -18,6 +18,35 @@ login_success_url_substring = "myworkday.com/CHANGE_ME/d/"
 # "Integrate calendar" -> Calendar ID). Looks like an email address.
 calendar_id = "CHANGE_ME@group.calendar.google.com"
 
+[optin]
+# Calendar sync can be gated on a Google Form. Create it with one single-select
+# question (dropdown, multiple choice, or radio) whose options are exactly "No"
+# and "Yes", and turn on "Collect email addresses" in the form settings. Paste
+# the form ID from its edit URL here:
+#   https://docs.google.com/forms/d/<FORM_ID>/edit
+# Leave empty to apply `default` to everyone (see below).
+form_id = ""
+
+# What to do when someone has no decisive form answer: no submission, an
+# unmapped person, or a response without a Yes/No answer. "opt_out" (default)
+# keeps them out of the calendar; "opt_in" keeps syncing them until they
+# explicitly answer No. An explicit No always opts out.
+default = "opt_out"
+
+# Map each respondent's Google email to their exact Workday display name (the
+# name shown on absence events), or to their Workday worker id. Unmapped people
+# follow `default`.
+# [optin.people]
+# "person@example.com" = "Person Name"
+
+[talent]
+# Optional — only needed for the `qc-*` (Quarterly Connections) commands.
+# The Workday "My Tasks" / inbox URL where Quarterly Connection tasks appear.
+my_tasks_url = "https://wd5.myworkday.com/CHANGE_ME/d/inbox"
+# The Google Doc that holds the quarterly connection write-ups.
+# NOTE: the per-quarter tabs ("2026Q1 QC", …) must already exist in that doc.
+doc_id = "CHANGE_ME"
+
 [sync]
 timezone = "Europe/Madrid"
 # Window of days to keep in sync, relative to today.

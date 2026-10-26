@@ -149,7 +149,7 @@ def cmd_sync(args) -> int:
         absences = workday.scrape_absences(context, cfg)
     result = gcal.sync(cfg, absences, dry_run=args.dry_run)
     prefix = "[dry-run] " if args.dry_run else ""
-    print(f"{prefix}Synced {len(absences)} absence(s): {result}")
+    print(f"{prefix}Processed {len(absences)} scraped absence(s): {result}")
     return 0
 
 
@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_gsetup = sub.add_parser(
         "setup-google",
-        help="Set up Google (project, Calendar API, OAuth client, authorization)",
+        help="Set up Google (project, Calendar/Forms/Docs APIs, OAuth client, authorization)",
     )
     _add_common(p_gsetup)
     p_gsetup.set_defaults(func=cmd_setup_google)

@@ -3,11 +3,13 @@ config.toml
 *.state.json
 state.json
 token.json
+*_token.json
 credentials.json
 .secrets/
 
 # Debug artifacts from the Workday scraper
 snapshots/
+nohup.out
 
 # Python
 __pycache__/

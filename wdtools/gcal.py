@@ -17,6 +17,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from . import optin
 from .config import Config
 from .models import AbsenceEvent
 
@@ -80,14 +81,17 @@ def _to_gcal_body(ev: AbsenceEvent, cfg: Config) -> dict:
     summary = ev.summary
     if cfg.summary_prefix:
         summary = f"{cfg.summary_prefix}{summary}"
+    private = {"source": SOURCE_TAG, "wdKey": ev.key}
+    if ev.person:
+        private["person"] = ev.person
+    if ev.person_id:
+        private["personId"] = ev.person_id
     return {
         "summary": summary,
         "start": {"date": ev.start.isoformat()},
         "end": {"date": ev.gcal_end_exclusive.isoformat()},
         "transparency": "transparent",  # don't block people's free/busy
-        "extendedProperties": {
-            "private": {"source": SOURCE_TAG, "wdKey": ev.key},
-        },
+        "extendedProperties": {"private": private},
     }
 
 
@@ -138,43 +142,118 @@ def _needs_update(existing: dict, desired: dict) -> bool:
     return bool(_changed_fields(existing, desired))
 
 
+def _managed_person(item: dict) -> str | None:
+    private = (item.get("extendedProperties") or {}).get("private") or {}
+    return private.get("person")
+
+
+def _managed_person_id(item: dict) -> str | None:
+    private = (item.get("extendedProperties") or {}).get("private") or {}
+    return private.get("personId")
+
+
+def _person_from_summary(summary: str, prefix: str) -> str:
+    """Best-effort person extraction for managed events created before `person`."""
+    text = summary or ""
+    if prefix and text.startswith(prefix):
+        text = text[len(prefix):]
+    return text.split(" — ", 1)[0].strip()
+
+
+def _deletion_reason(
+    item: dict,
+    key: str,
+    directory: optin.OptInDirectory,
+    opted_out_reasons: dict[str, str],
+    cfg: Config,
+) -> str:
+    """Explain why a managed event is being deleted (opt-out vs. gone from Workday)."""
+    if not directory.configured:
+        if directory.default_opted_in:
+            return "no longer in Workday"
+        return "opted out (no opt-in form configured)"
+    if key in opted_out_reasons:
+        return opted_out_reasons[key]
+
+    person = _managed_person(item) or _person_from_summary(
+        item.get("summary", ""), cfg.summary_prefix
+    )
+    person_id = _managed_person_id(item)
+    if (person or person_id) and not directory.is_person_opted_in(
+        person or "", person_id
+    ):
+        return directory.explain(person or "", person_id)
+    return "no longer in Workday"
+
+
 class SyncResult:
     def __init__(self) -> None:
         self.created = 0
         self.updated = 0
         self.deleted = 0
         self.unchanged = 0
+        self.opted_out = 0
 
     def __str__(self) -> str:
         return (
             f"created={self.created} updated={self.updated} "
-            f"deleted={self.deleted} unchanged={self.unchanged}"
+            f"deleted={self.deleted} unchanged={self.unchanged} "
+            f"opted_out={self.opted_out}"
         )
 
 
 def sync(cfg: Config, absences: list[AbsenceEvent], dry_run: bool = False) -> SyncResult:
     tag = "[dry-run] " if dry_run else ""
-    service = _service(cfg)
     window_start = date.today() - timedelta(days=cfg.days_back)
     window_end = date.today() + timedelta(days=cfg.days_forward)
     logger.info("%sSyncing to calendar %s, window %s .. %s",
                 tag, cfg.calendar_id, window_start, window_end)
 
-    # Only sync absences that fall inside the window (end >= window_start,
+    # Resolve opt-in decisions before touching the calendar. If the configured
+    # form cannot be read, this raises and aborts the sync without any writes.
+    directory = optin.load_directory(cfg)
+    service = _service(cfg)
+
+    # Only consider absences that fall inside the window (end >= window_start,
     # start < window_end), so we don't delete out-of-window managed events.
-    desired = {
-        ev.key: ev
+    in_window = [
+        ev
         for ev in absences
         if ev.end >= window_start and ev.start < window_end
-    }
-    logger.info("%d absence(s) fall within the window (tagged source=%s).",
-                len(desired), SOURCE_TAG)
+    ]
+    desired: dict[str, AbsenceEvent] = {}
+    opted_out: list[AbsenceEvent] = []
+    opted_out_reasons: dict[str, str] = {}
+    for ev in in_window:
+        if directory.is_opted_in(ev):
+            desired[ev.key] = ev
+        else:
+            reason = directory.explain(ev.person, ev.person_id)
+            opted_out.append(ev)
+            opted_out_reasons[ev.key] = reason
+            logger.info(
+                "%sOpted out, not syncing: %s (%s..%s) — %s",
+                tag,
+                ev.summary,
+                ev.start,
+                ev.end,
+                reason,
+            )
+    logger.info(
+        "%d absence(s) fall within the window; %d opted in, %d opted out "
+        "(tagged source=%s).",
+        len(in_window),
+        len(desired),
+        len(opted_out),
+        SOURCE_TAG,
+    )
     logger.info("Fetching existing workday-managed events…")
     existing = _fetch_managed(service, cfg, window_start, window_end)
     logger.info("Found %d managed event(s) already on the calendar "
                 "(hand-added events are not fetched and never touched).", len(existing))
 
     result = SyncResult()
+    result.opted_out = len(opted_out)
 
     for key, ev in desired.items():
         body = _to_gcal_body(ev, cfg)
@@ -200,8 +279,11 @@ def sync(cfg: Config, absences: list[AbsenceEvent], dry_run: bool = False) -> Sy
 
     for key, item in existing.items():
         if key not in desired:
-            logger.info("%sdelete: %s", tag, item.get("summary", key))
-            logger.debug("  wdKey=%s (managed event no longer in Workday within window)", key)
+            reason = _deletion_reason(
+                item, key, directory, opted_out_reasons, cfg
+            )
+            logger.info("%sdelete: %s [%s]", tag, item.get("summary", key), reason)
+            logger.debug("  wdKey=%s (%s)", key, reason)
             if not dry_run:
                 service.events().delete(
                     calendarId=cfg.calendar_id, eventId=item["id"]
