@@ -8,7 +8,7 @@ import shutil
 import sys
 import textwrap
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,27 @@ login_success_url_substring = "myworkday.com/CHANGE_ME/d/"
 # The calendar ID of the shared team calendar (Google Calendar settings ->
 # "Integrate calendar" -> Calendar ID). Looks like an email address.
 calendar_id = "CHANGE_ME@group.calendar.google.com"
+
+[optin]
+# Calendar sync can be gated on a Google Form. Create it with one single-select
+# question (dropdown, multiple choice, or radio) whose options are exactly "No"
+# and "Yes", and turn on "Collect email addresses" in the form settings. Paste
+# the form ID from its edit URL here:
+#   https://docs.google.com/forms/d/<FORM_ID>/edit
+# Leave empty to apply `default` to everyone (see below).
+form_id = ""
+
+# What to do when someone has no decisive form answer: no submission, an
+# unmapped person, or a response without a Yes/No answer. "opt_out" (default)
+# keeps them out of the calendar; "opt_in" keeps syncing them until they
+# explicitly answer No. An explicit No always opts out.
+default = "opt_out"
+
+# Map each respondent's Google email to their exact Workday display name (the
+# name shown on absence events), or to their Workday worker id. Unmapped people
+# follow `default`.
+# [optin.people]
+# "person@example.com" = "Person Name"
 
 [talent]
 # Optional — only needed for the `qc-*` (Quarterly Connections) commands.
@@ -116,6 +137,27 @@ def _migrate(old: Path, new: Path) -> None:
         old.replace(new)
 
 
+_OPTIN_DEFAULT_ALIASES = {
+    "opt_out": "opt_out",
+    "opt-out": "opt_out",
+    "opted_out": "opt_out",
+    "opt_in": "opt_in",
+    "opt-in": "opt_in",
+    "opted_in": "opt_in",
+}
+
+
+def _parse_optin_default(value: object) -> str:
+    """Normalize [optin].default, accepting common spelling variants."""
+    key = str(value).strip().casefold()
+    try:
+        return _OPTIN_DEFAULT_ALIASES[key]
+    except KeyError:
+        raise ValueError(
+            '[optin].default must be "opt_out" or "opt_in".'
+        ) from None
+
+
 @dataclass(frozen=True)
 class Config:
     # Workday
@@ -135,7 +177,12 @@ class Config:
     google_credentials_path: Path
     google_token_path: Path
     google_docs_token_path: Path
+    google_forms_token_path: Path
     qc_cache_path: Path
+    # Opt-in gate for calendar sync (optional; empty form_id = use default for everyone)
+    optin_form_id: str = ""
+    optin_default: str = "opt_out"  # "opt_out" (default) or "opt_in"
+    optin_people: dict[str, str] = field(default_factory=dict)
     # Talent / Quarterly Connections (optional; only the `qc-*` commands need these)
     my_tasks_url: str = ""
     talent_doc_id: str = ""
@@ -154,6 +201,18 @@ class Config:
         g = raw.get("google", {})
         s = raw.get("sync", {})
         t = raw.get("talent", {})
+        o = raw.get("optin", {})
+
+        people_raw = o.get("people", {}) or {}
+        if not isinstance(people_raw, dict):
+            raise ValueError(
+                "[optin.people] must be a TOML table of email = \"Workday name\" entries."
+            )
+        optin_people = {
+            str(email).strip(): str(person).strip()
+            for email, person in people_raw.items()
+            if str(email).strip() and str(person).strip()
+        }
 
         cd = config_dir()
         cd.mkdir(parents=True, exist_ok=True)
@@ -178,7 +237,11 @@ class Config:
             google_credentials_path=cd / "credentials.json",
             google_token_path=sd / "token.json",
             google_docs_token_path=sd / "docs_token.json",
+            google_forms_token_path=sd / "forms_token.json",
             qc_cache_path=sd / "qc_cache.json",
+            optin_form_id=str(o.get("form_id", "") or "").strip(),
+            optin_default=_parse_optin_default(o.get("default", "opt_out")),
+            optin_people=optin_people,
             my_tasks_url=t.get("my_tasks_url", ""),
             talent_doc_id=t.get("doc_id", ""),
         )
@@ -190,6 +253,27 @@ class Config:
     def validate(self) -> None:
         if "CHANGE_ME" in self.workday_home_url + self.absence_calendar_url + self.calendar_id:
             raise ValueError("config.toml still contains CHANGE_ME placeholders — fill them in.")
+        self.validate_optin()
+
+    def validate_optin(self) -> None:
+        """Check the [optin] values used by calendar sync.
+
+        An empty ``form_id`` is valid and applies ``optin_default`` to everyone.
+        A configured form, however, is useless without at least one email ->
+        Workday person mapping, since form responses only carry the respondent's
+        email address.
+        """
+        if self.optin_default not in {"opt_out", "opt_in"}:
+            raise ValueError('[optin].default must be "opt_out" or "opt_in".')
+        if not self.optin_form_id:
+            return
+        if "CHANGE_ME" in self.optin_form_id:
+            raise ValueError("[optin].form_id still contains CHANGE_ME — fill it in.")
+        if not self.optin_people:
+            raise ValueError(
+                "[optin].form_id is set but [optin.people] is empty. Add at least "
+                'one mapping like "person@example.com" = "Person Name".'
+            )
 
     def validate_talent(self) -> None:
         """Check the [talent] values the `qc-*` commands need are filled in.
@@ -208,6 +292,13 @@ class Config:
 
     def as_box(self, source: Path) -> str:
         """Render the resolved config as a bordered, width-wrapped block."""
+        optin_rows: list[tuple[str, object]] = [
+            ("form_id", self.optin_form_id or "(unset)"),
+            ("default", self.optin_default),
+        ]
+        optin_rows += sorted(self.optin_people.items()) or [
+            ("people", "(unset — no responses can be matched)"),
+        ]
         sections: list[tuple[str, list[tuple[str, object]]]] = [
             ("source", [("config.toml", source)]),
             (
@@ -219,6 +310,7 @@ class Config:
                 ],
             ),
             ("google", [("calendar_id", self.calendar_id)]),
+            ("optin", optin_rows),
             (
                 "talent",
                 [
@@ -243,14 +335,15 @@ class Config:
                     ("google_credentials_path", self.google_credentials_path),
                     ("google_token_path", self.google_token_path),
                     ("google_docs_token_path", self.google_docs_token_path),
+                    ("google_forms_token_path", self.google_forms_token_path),
                     ("qc_cache_path", self.qc_cache_path),
                 ],
             ),
         ]
-        return _render_box("Resolved configuration", sections)
+        return render_box("Resolved configuration", sections)
 
 
-def _render_box(title: str, sections: list[tuple[str, list[tuple[str, object]]]]) -> str:
+def render_box(title: str, sections: list[tuple[str, list[tuple[str, object]]]]) -> str:
     """Draw a bordered box; long values wrap with a hanging indent."""
     width = min(shutil.get_terminal_size((100, 24)).columns, 100)
     inner = max(width - 4, 20)  # room for "│ " … " │"

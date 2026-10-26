@@ -6,7 +6,8 @@ API-based writes to Google Calendar.
 First utility: **sync the team absence calendar from Workday into a shared Google
 Calendar.** Idempotent — safe to run on a schedule; it converges the calendar to
 match Workday instead of piling up duplicates, and never touches events people
-added by hand.
+added by hand. Calendar sync can be gated on a Google Form so people choose
+whether their absences are shared (see [Opt-in for calendar sync](#opt-in-for-calendar-sync)).
 
 ## How it works
 
@@ -18,9 +19,15 @@ added by hand.
   Every event the tool creates is stamped with a private extended property
   (`source=workday-sync`) so sync can safely create / update / delete only its
   own events.
+- **Opt-in gate — Google Forms:** an optional Google Form (one single-select
+  question — dropdown, multiple choice, or radio — with options `No` / `Yes`,
+  collecting respondent emails) decides whose absences are allowed onto the
+  calendar. An explicit `No` always opts out; people without a decisive response
+  follow `[optin].default` (`opt_out` by default). In-window managed events for
+  opted-out people are removed.
 
 ```
-Workday (Playwright, headless)  ->  AbsenceEvent[]  ->  Google Calendar API
+Workday (Playwright, headless)  ->  AbsenceEvent[]  ->  opt-in filter  ->  Google Calendar API
 ```
 
 ## Install
@@ -92,8 +99,8 @@ uv run wdtools init
 # writes a config.toml template to the platform config dir
 # (~/.config/workday-tools/ on Linux, ~/Library/Application Support/workday-tools/
 # on macOS; override the location with XDG_CONFIG_HOME or `--config`), then edit
-# it — tenant URLs, the absence calendar URL, and the Google calendar ID of the
-# shared team calendar
+# it — tenant URLs, the absence calendar URL, the Google calendar ID of the
+# shared team calendar, and (optionally) the [optin] form/mapping
 ```
 
 All commands read this default location, so no `--config` flag is needed for
@@ -106,11 +113,16 @@ uv run wdtools setup-google
 ```
 
 This drives the whole Google side with `gcloud`: it selects (or creates) a
-project, enables the Calendar API, walks you through the one manual step Google
-has no API for — creating a *Desktop app* OAuth client and downloading its JSON —
-saves it to `~/.config/workday-tools/credentials.json`, then runs the consent
-flow (caching the token at `~/.local/state/workday-tools/token.json`) and
-verifies access to your `calendar_id`.
+project, enables the Calendar, Forms, and Docs APIs, walks you through the one
+manual step Google has no API for — creating a *Desktop app* OAuth client and
+downloading its JSON — saves it to `~/.config/workday-tools/credentials.json`,
+then runs the consent flow (caching the token at
+`~/.local/state/workday-tools/token.json`) and verifies access to your
+`calendar_id`.
+
+The Forms API is enabled as part of setup. If `[optin].form_id` is set, setup
+also runs the Forms consent flow, caches `forms_token.json` next to the calendar
+token, and verifies that the authorized account can read the form's responses.
 
 Prerequisites: the Google Cloud SDK (`gcloud`) installed and `gcloud auth login`
 done. Set `calendar_id` in your `config.toml` first, so the final verification
@@ -118,7 +130,81 @@ can run.
 
 Prefer to do it by hand? Create an OAuth client of type *Desktop app* in the
 Cloud Console, download the JSON to `~/.config/workday-tools/credentials.json`;
-the first `sync` will open a browser to authorize.
+the first `sync` will open a browser to authorize. If you use `[optin]`, also
+enable the Forms API in the project; the first `sync` will separately request the
+Forms scope and cache `forms_token.json`.
+
+## Opt-in for calendar sync
+
+If the shared calendar is visible more widely than people expect, gate it on a
+Google Form so each person explicitly chooses to share their PTO/public holidays.
+By default the tool syncs mapped people who answered **Yes**; set
+`[optin].default = "opt_in"` if non-responders should stay synced until they
+explicitly answer **No**.
+
+Create the form first:
+
+1. Create a Google Form with **one single-select question** (a dropdown is fine —
+   the Forms API reports dropdown selections the same way as multiple-choice
+   answers), e.g. *"Do you want your PTO and public holidays synced to the shared
+   calendar?"*, with exactly two options: **No** and **Yes** (the parser matches
+   those words case-insensitively; variants like `Yes.` or `Yep` are not
+   recognized).
+2. In **Settings → Responses**, turn on **Collect email addresses** (and,
+   ideally, limit responses to your organization). Without an email the response
+   cannot be matched to a person.
+3. Copy the form ID from the edit URL:
+   `https://docs.google.com/forms/d/<FORM_ID>/edit`.
+
+Configure it in `config.toml`:
+
+```toml
+[optin]
+form_id = "<FORM_ID>"
+# Fallback when there is no decisive answer: "opt_out" (default) or "opt_in".
+default = "opt_out"
+
+[optin.people]
+# Google Form respondent email -> exact Workday display name (or worker id).
+"person@example.com" = "Person Name"
+# "other@example.com" = "247$1733"
+```
+
+The matching is deliberately explicit: Google Forms gives you the respondent's
+email, while Workday gives display names and worker ids. The `[optin.people]`
+table is the bridge; keep it current when people join, leave, or change names.
+
+Behavior:
+
+- **Yes** → their absences sync normally.
+- **No** → opted out. Nothing new is synced, and existing `workday-sync` events
+  for them are deleted within the sync window.
+- **No submission**, **not listed in `[optin.people]`**, or a response with **no
+  Yes/No answer** → follows `[optin].default`. With `opt_out` (the default) they
+  are treated as opted out and their in-window managed events are deleted; with
+  `opt_in` they stay synced unless they later answer **No**.
+- If someone submits more than once, the **latest** response wins. On a
+  timestamp tie, `No` outranks a no-answer response, which outranks `Yes`.
+- A form response whose email is not in `[optin.people]` is ignored (and logged);
+  the Workday person follows `default`.
+- If `form_id` is empty, `default` applies to everyone: `opt_out` deletes all
+  managed events in the sync window; `opt_in` keeps syncing them. Preview with
+  `wdtools sync --dry-run -v`.
+- If the form is configured but cannot be read (API disabled, wrong ID, missing
+  consent), sync **aborts before making any calendar changes**, regardless of
+  `default`, rather than treating everyone as opted out.
+
+Run `wdtools setup-google` after setting `form_id`; it enables the Forms API and
+caches the `forms.responses.readonly` consent. The tool logs each response, the
+resolved decision, skipped absences, and every deletion with its reason. Add
+`-vv` to print the full response/mapping box in the same style as the resolved
+configuration.
+
+> **Upgrading from a version without opt-in?** Add and fill in an `[optin]`
+> section before running `sync`. If you leave `form_id` empty, the first run
+> applies `default`: `opt_out` (the default) treats everyone as opted out and
+> deletes the events it manages within the sync window; `opt_in` keeps everyone
+> synced.
 
 ## Menu bar / tray app (recommended daily driver)
 
@@ -172,6 +258,9 @@ wdtools scrape
 
 # Full sync into Google Calendar
 wdtools sync            # add --dry-run to preview changes
+
+# Preview opt-in decisions + creates/updates/deletes without writing
+wdtools sync --dry-run -v
 ```
 
 Any command auto-triggers the login flow if there's no valid saved session, so
@@ -271,10 +360,13 @@ pop a login window unattended) — just run `wdtools login` again.
 
 - Nothing lives in the repo. Config and the user-supplied Google client secret
   go in the config dir (`~/.config/workday-tools/`); the saved Workday session
-  and the Google token — app-managed state — go in the state dir
+  and the Google OAuth tokens — app-managed state — go in the state dir
   (`~/.local/state/workday-tools/`, per the XDG spec). macOS keeps both under
   `~/Library/Application Support/workday-tools/`. Nothing stores your Workday
   password.
 - The saved session and tokens are live credentials — treat those directories
-  like an SSH key.
-```
+  like an SSH key. The Forms token (`forms_token.json`) grants read access to the
+  opt-in form's responses.
+- Opt-in responses contain employee emails, names, and Yes/No answers; the
+  mapping and the tool's logs contain the same information. Protect the config
+  dir and the tray/sync logs accordingly.
