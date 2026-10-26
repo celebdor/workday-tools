@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from . import auth, config as config_mod, gcal, workday
+from . import auth, config as config_mod, gcal, qc, workday
 from .config import Config
 
 
@@ -25,6 +25,20 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         action="count",
         default=0,
         help="Show progress logging (-v for info, -vv for debug).",
+    )
+
+
+def _add_qc_cache_args(p: argparse.ArgumentParser) -> None:
+    """Caching flags shared by qc-scrape and qc-sync."""
+    p.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Re-scrape every task from Workday, ignoring the cache (and rewrite it)",
+    )
+    p.add_argument(
+        "--offline",
+        action="store_true",
+        help="Don't contact Workday at all; use only cached connections",
     )
 
 
@@ -139,6 +153,69 @@ def cmd_sync(args) -> int:
     return 0
 
 
+def cmd_qc_snapshot(args) -> int:
+    cfg = Config.load(args.config)
+    auth.ensure_session(cfg)
+    out_dir = Path(args.out)
+    with auth.workday_context(cfg, headless=not args.headful) as context:
+        index_path = qc.snapshot(context, cfg, out_dir, task_index=args.task)
+    print(f"Snapshot written under {out_dir}/ (XHR manifest: {index_path}).")
+    print(
+        "Inspect the qc-*.html / *.png and the '*-xhr-index.json' manifest, then "
+        "finalize the selectors in wdtools/qc.py:SELECTORS."
+    )
+    return 0
+
+
+def _qc_connections(args, cfg):
+    """Resolve connections for qc-scrape/qc-sync, honoring --offline / --refresh."""
+    if args.offline:
+        connections = qc.load_offline_connections(cfg)
+        if not connections:
+            raise RuntimeError(
+                "No cached connections to work from. Run without --offline once "
+                "(optionally with --refresh) to populate the cache."
+            )
+        print(f"Using {len(connections)} cached connection(s) (offline).", file=sys.stderr)
+        return connections
+    auth.ensure_session(cfg)
+    with auth.workday_context(cfg, headless=not args.headful) as context:
+        return qc.scrape_quarterly_connections(context, cfg, refresh=args.refresh)
+
+
+def cmd_qc_scrape(args) -> int:
+    cfg = Config.load(args.config)
+    cfg.validate_talent()
+    connections = _qc_connections(args, cfg)
+    for c in connections:
+        print(f"\n# {c.employee}  [{c.tab_name}]  (period: {c.period_label!r})")
+        if c.previous is not None:
+            mgr = "yes" if c.previous.manager_html.strip() else "no"
+            assoc = "yes" if c.previous.associate_html.strip() else "no"
+            print(f"  (previous {c.previous.label}: manager={mgr}, associate={assoc})")
+        else:
+            print("  (previous priorities: none found)")
+        for section in c.sections:
+            print(f"  ## {section.name}")
+            for q in section.questions:
+                print(f"    - Q: {q.question}")
+                print(f"      A: {q.answer}")
+    print(f"\n{len(connections)} quarterly connection(s).", file=sys.stderr)
+    return 0
+
+
+def cmd_qc_sync(args) -> int:
+    cfg = Config.load(args.config)
+    cfg.validate_talent()
+    from . import gdocs  # lazy: only this command needs the Docs client
+
+    connections = _qc_connections(args, cfg)
+    result = gdocs.sync(cfg, connections, dry_run=args.dry_run, replace=args.replace)
+    prefix = "[dry-run] " if args.dry_run else ""
+    print(f"{prefix}Processed {len(connections)} connection(s): {result}")
+    return 0
+
+
 def cmd_tray(args) -> int:
     cfg = Config.load(args.config)
     from . import trayapp  # imported lazily so headless CLI use doesn't need pystray
@@ -188,6 +265,47 @@ def main(argv: list[str] | None = None) -> int:
     p_sync.add_argument("--dry-run", action="store_true", help="Report changes without writing")
     _add_common(p_sync)
     p_sync.set_defaults(func=cmd_sync)
+
+    p_qc_snap = sub.add_parser(
+        "qc-snapshot", help="Dump the My Tasks / Quarterly Connection pages for selector dev"
+    )
+    p_qc_snap.add_argument("--out", default="snapshots", help="Output directory")
+    p_qc_snap.add_argument(
+        "--task", type=int, default=None,
+        help="1-based index of a Quarterly Connection task to open and snapshot in full",
+    )
+    p_qc_snap.add_argument(
+        "--headful", action="store_true", help="Run with a visible browser (debugging)"
+    )
+    _add_common(p_qc_snap)
+    p_qc_snap.set_defaults(func=cmd_qc_snapshot)
+
+    p_qc_scrape = sub.add_parser(
+        "qc-scrape", help="Scrape Quarterly Connections and print them (no doc writes)"
+    )
+    _add_qc_cache_args(p_qc_scrape)
+    p_qc_scrape.add_argument(
+        "--headful", action="store_true", help="Run with a visible browser (debugging)"
+    )
+    _add_common(p_qc_scrape)
+    p_qc_scrape.set_defaults(func=cmd_qc_scrape)
+
+    p_qc_sync = sub.add_parser(
+        "qc-sync", help="Scrape Quarterly Connections and write them into the Google Doc"
+    )
+    p_qc_sync.add_argument("--dry-run", action="store_true", help="Report changes without writing")
+    p_qc_sync.add_argument(
+        "--replace",
+        action="store_true",
+        help="Rewrite employees already in the tab (deletes their existing block, "
+        "including any manager response typed there)",
+    )
+    _add_qc_cache_args(p_qc_sync)
+    p_qc_sync.add_argument(
+        "--headful", action="store_true", help="Run with a visible browser (debugging)"
+    )
+    _add_common(p_qc_sync)
+    p_qc_sync.set_defaults(func=cmd_qc_sync)
 
     p_tray = sub.add_parser("tray", help="Run the menu bar / tray app with a scheduler")
     _add_common(p_tray)

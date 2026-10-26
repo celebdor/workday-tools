@@ -52,3 +52,79 @@ class AbsenceEvent:
     def gcal_end_exclusive(self) -> date:
         """Google all-day events use an *exclusive* end date."""
         return self.end + timedelta(days=1)
+
+
+# --- Quarterly Connections -------------------------------------------------
+#
+# A separate utility scrapes Workday "My Tasks" for Quarterly Connection reviews
+# and writes the associate's answers into a Google Doc. These models normalize one
+# connection away from Workday's page structure.
+
+
+def quarter_for(month: int) -> int:
+    """Calendar quarter (1-4) for a 1-12 month. Q1 Jan-Mar … Q4 Oct-Dec."""
+    if not 1 <= month <= 12:
+        raise ValueError(f"month out of range: {month}")
+    return (month - 1) // 3 + 1
+
+
+@dataclass(frozen=True)
+class QCQuestion:
+    """A single prompt in a Quarterly Connection section and the associate's answer.
+
+    ``answer`` is the plain-text rendition (for console output); ``answer_html`` is
+    the original rich-text HTML, which :mod:`wdtools.gdocs` translates to preserve
+    bold/italic/links/lists when writing to the Google Doc.
+    """
+
+    question: str
+    answer: str
+    answer_html: str = ""
+
+
+@dataclass(frozen=True)
+class QCSection:
+    """One left-nav section of the manager evaluation (e.g. "Accomplishments")."""
+
+    name: str
+    questions: tuple[QCQuestion, ...]
+
+
+@dataclass(frozen=True)
+class PreviousPriorities:
+    """The previous quarter's Priorities, as two rich-text (HTML) columns.
+
+    Captured from the associate's prior completed Quarterly Connection; rendered as a
+    table at the top of the employee's block so the carryover is visible.
+    """
+
+    year: int
+    quarter: int
+    manager_html: str = ""
+    associate_html: str = ""
+
+    @property
+    def label(self) -> str:
+        return f"{self.year}Q{self.quarter}"
+
+
+@dataclass(frozen=True)
+class QuarterlyConnection:
+    """One employee's Quarterly Connection, normalized from the Workday task.
+
+    ``year``/``quarter`` come from the review period and name the target Google Doc
+    tab (``tab_name``); ``period_label`` keeps Workday's raw text for diagnostics.
+    ``previous`` carries the prior quarter's Priorities (None if none was found).
+    """
+
+    employee: str
+    year: int
+    quarter: int
+    sections: tuple[QCSection, ...]
+    period_label: str = ""
+    previous: "PreviousPriorities | None" = None
+
+    @property
+    def tab_name(self) -> str:
+        """The Google Doc tab this connection belongs in, e.g. '2026Q1 QC'."""
+        return f"{self.year}Q{self.quarter} QC"

@@ -37,6 +37,17 @@ login_success_url_substring = "myworkday.com/CHANGE_ME/d/"
 # "Integrate calendar" -> Calendar ID). Looks like an email address.
 calendar_id = "CHANGE_ME@group.calendar.google.com"
 
+[talent]
+# Optional — only needed for the `qc-*` (Quarterly Connections) commands.
+# The Workday "My Tasks" / inbox URL where Quarterly Connection tasks appear.
+# Open it in your browser once and copy the URL from the address bar.
+my_tasks_url = "https://wd5.myworkday.com/CHANGE_ME/d/inbox"
+# The Google Doc that holds the quarterly connection write-ups. Copy its id from
+# the URL: https://docs.google.com/document/d/<doc_id>/edit
+# NOTE: the per-quarter tabs ("2026Q1 QC", …) must already exist in that doc — the
+# Google Docs API cannot create tabs, so the tool fills existing tabs by name.
+doc_id = "CHANGE_ME"
+
 [sync]
 timezone = "Europe/Madrid"
 # Window of days to keep in sync, relative to today.
@@ -123,6 +134,11 @@ class Config:
     state_path: Path
     google_credentials_path: Path
     google_token_path: Path
+    google_docs_token_path: Path
+    qc_cache_path: Path
+    # Talent / Quarterly Connections (optional; only the `qc-*` commands need these)
+    my_tasks_url: str = ""
+    talent_doc_id: str = ""
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -137,6 +153,7 @@ class Config:
         wd = raw.get("workday", {})
         g = raw.get("google", {})
         s = raw.get("sync", {})
+        t = raw.get("talent", {})
 
         cd = config_dir()
         cd.mkdir(parents=True, exist_ok=True)
@@ -160,6 +177,10 @@ class Config:
             state_path=sd / "workday.state.json",
             google_credentials_path=cd / "credentials.json",
             google_token_path=sd / "token.json",
+            google_docs_token_path=sd / "docs_token.json",
+            qc_cache_path=sd / "qc_cache.json",
+            my_tasks_url=t.get("my_tasks_url", ""),
+            talent_doc_id=t.get("doc_id", ""),
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Resolved configuration:\n%s", cfg.as_box(path))
@@ -169,6 +190,21 @@ class Config:
     def validate(self) -> None:
         if "CHANGE_ME" in self.workday_home_url + self.absence_calendar_url + self.calendar_id:
             raise ValueError("config.toml still contains CHANGE_ME placeholders — fill them in.")
+
+    def validate_talent(self) -> None:
+        """Check the [talent] values the `qc-*` commands need are filled in.
+
+        Kept separate from ``validate`` so calendar-only configs (no [talent]
+        section) keep working for `login`/`sync`.
+        """
+        if not self.my_tasks_url or not self.talent_doc_id:
+            raise ValueError(
+                "The Quarterly Connections commands need a [talent] section in "
+                "config.toml with 'my_tasks_url' and 'doc_id'. Run `wdtools init` "
+                "to see the template, or add them to your existing config."
+            )
+        if "CHANGE_ME" in self.my_tasks_url + self.talent_doc_id:
+            raise ValueError("[talent] still contains CHANGE_ME placeholders — fill them in.")
 
     def as_box(self, source: Path) -> str:
         """Render the resolved config as a bordered, width-wrapped block."""
@@ -183,6 +219,13 @@ class Config:
                 ],
             ),
             ("google", [("calendar_id", self.calendar_id)]),
+            (
+                "talent",
+                [
+                    ("my_tasks_url", self.my_tasks_url or "(unset)"),
+                    ("doc_id", self.talent_doc_id or "(unset)"),
+                ],
+            ),
             (
                 "sync",
                 [
@@ -199,6 +242,8 @@ class Config:
                     ("state_path", self.state_path),
                     ("google_credentials_path", self.google_credentials_path),
                     ("google_token_path", self.google_token_path),
+                    ("google_docs_token_path", self.google_docs_token_path),
+                    ("qc_cache_path", self.qc_cache_path),
                 ],
             ),
         ]
