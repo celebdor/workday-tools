@@ -66,15 +66,13 @@ sync_times = ["09:30", "15:30"]
 def config_dir() -> Path:
     """Directory for config and user-supplied secrets (config.toml, credentials.json).
 
-    Honors ``XDG_CONFIG_HOME`` as a cross-platform override; otherwise follows
-    each platform's convention (``~/Library/Application Support`` on macOS,
-    ``~/.config`` elsewhere).
+    Honors ``XDG_CONFIG_HOME``; otherwise uses the same ``~/.config`` location
+    on every platform. This keeps command invocations and credential placement
+    consistent between macOS and Linux.
     """
     base = os.environ.get("XDG_CONFIG_HOME")
     if base:
         return Path(base) / APP_DIR_NAME
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / APP_DIR_NAME
     return Path.home() / ".config" / APP_DIR_NAME
 
 
@@ -106,7 +104,12 @@ def log_dir() -> Path:
 
 def default_config_path() -> Path:
     """Where `init` writes, and where commands look for config.toml by default."""
-    return config_dir() / "config.toml"
+    current = config_dir() / "config.toml"
+    # Keep existing macOS installs usable after moving the default to ~/.config.
+    legacy = Path.home() / "Library" / "Application Support" / APP_DIR_NAME / "config.toml"
+    if sys.platform == "darwin" and not current.exists() and legacy.exists():
+        return legacy
+    return current
 
 
 def _migrate(old: Path, new: Path) -> None:
@@ -155,7 +158,10 @@ class Config:
         s = raw.get("sync", {})
         t = raw.get("talent", {})
 
-        cd = config_dir()
+        # Put an OAuth client next to the chosen config file. In particular, an
+        # explicit ``--config`` must not require XDG_CONFIG_HOME just to find its
+        # sibling credentials.json.
+        cd = path.parent
         cd.mkdir(parents=True, exist_ok=True)
         sd = state_dir()
         sd.mkdir(parents=True, exist_ok=True)

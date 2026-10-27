@@ -179,6 +179,52 @@ def _discover_tasks(capture: NetworkCapture) -> list[_TaskRef]:
     return refs
 
 
+def _discover_dom_tasks(page: Page) -> list[_TaskRef]:
+    """Fallback discovery for inboxes that do not expose ``queryTasks`` XHR data.
+
+    Current Workday inboxes expose each task as an accessible button whose text
+    includes the title and effective date.  These rows do not provide a task URI,
+    so callers select the row in the already-open inbox before entering the
+    evaluation wizard.
+    """
+    refs: list[_TaskRef] = []
+    seen: set[tuple[str, str]] = set()
+    for i in range(page.get_by_role("button").count()):
+        try:
+            text = page.get_by_role("button").nth(i).inner_text(timeout=1_000)
+        except Exception:
+            continue
+        m = QC_TITLE_RE.search(text)
+        if not m:
+            continue
+        effective = re.search(r"Effective:\s*([^\n]+)", text, re.I)
+        if not effective:
+            continue
+        period = effective.group(1).strip()
+        title = m.group(0).strip()
+        marker = (title.lower(), period)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        try:
+            year, quarter = period_to_quarter(period)
+        except ValueError as exc:
+            logger.error("%s — skipping %s.", exc, title)
+            continue
+        refs.append(
+            _TaskRef(
+                employee=m.group("name").strip(),
+                year=year,
+                quarter=quarter,
+                overview_uri="",
+                title=title,
+                period_label=period,
+            )
+        )
+    logger.info("Discovered %d Quarterly Connection task(s) from inbox rows.", len(refs))
+    return refs
+
+
 # --- Browser navigation ----------------------------------------------------
 
 
@@ -486,14 +532,15 @@ def _open_evaluation(
     page: Page, cfg: Config, ref: _TaskRef, capture: NetworkCapture | None = None
 ) -> bool:
     """Navigate to a task's overview and enter the guided editor. False on failure."""
-    url = _abs(cfg, ref.overview_uri)
-    logger.info("Opening evaluation for %s: %s", ref.employee, url)
-    try:
-        page.goto(url, wait_until="domcontentloaded")
-    except Exception:
-        logger.warning("Could not open overview for %s", ref.employee)
-        return False
-    _settle(page)
+    if ref.overview_uri:
+        url = _abs(cfg, ref.overview_uri)
+        logger.info("Opening evaluation for %s: %s", ref.employee, url)
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+        except Exception:
+            logger.warning("Could not open overview for %s", ref.employee)
+            return False
+        _settle(page)
     if not _click_get_started(page, cfg, capture):
         logger.warning("Could not enter the guided editor for %s", ref.employee)
         return False
@@ -669,6 +716,8 @@ def scrape_quarterly_connections(
     page = _open_inbox(context, cfg, capture=capture)
     refs = _discover_tasks(capture)
     if not refs:
+        refs = _discover_dom_tasks(page)
+    if not refs:
         logger.warning(
             "No 'Quarterly Connection' tasks found in the inbox JSON. If you expected "
             "some, re-run `wdtools qc-snapshot` and check the queryTasks payload."
@@ -678,7 +727,7 @@ def scrape_quarterly_connections(
     connections: list[QuarterlyConnection] = []
     scraped = 0
     for ref in refs:
-        key = ref.overview_uri
+        key = ref.overview_uri or f"dom:{ref.title}:{ref.period_label}"
         if not refresh and key in cache:
             logger.info("Using cached connection for %s (%dQ%d)",
                         ref.employee, ref.year, ref.quarter)
@@ -686,6 +735,17 @@ def scrape_quarterly_connections(
             continue
 
         logger.info("Processing %s (%dQ%d)", ref.employee, ref.year, ref.quarter)
+        if not ref.overview_uri:
+            try:
+                page.goto(cfg.my_tasks_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(5_000)
+                page.get_by_role("button", name=re.compile(r"^" + re.escape(ref.title))).first.click(
+                    timeout=NAV_TIMEOUT_MS
+                )
+                _settle(page)
+            except Exception:
+                logger.warning("Could not select inbox task for %s", ref.employee)
+                continue
         if not _open_evaluation(page, cfg, ref, capture):
             continue
         # Let the task wizard finish rendering its first section + left rail.
