@@ -89,9 +89,8 @@ Then run any command with `uv run wdtools …` (e.g. `uv run wdtools sync`).
 
 ```bash
 uv run wdtools init
-# writes a config.toml template to the platform config dir
-# (~/.config/workday-tools/ on Linux, ~/Library/Application Support/workday-tools/
-# on macOS; override the location with XDG_CONFIG_HOME or `--config`), then edit
+# writes a config.toml template to ~/.config/workday-tools/config.toml on macOS
+# and Linux (override the location with `--config`), then edit
 # it — tenant URLs, the absence calendar URL, and the Google calendar ID of the
 # shared team calendar
 ```
@@ -270,11 +269,10 @@ pop a login window unattended) — just run `wdtools login` again.
 ## Security notes
 
 - Nothing lives in the repo. Config and the user-supplied Google client secret
-  go in the config dir (`~/.config/workday-tools/`); the saved Workday session
-  and the Google token — app-managed state — go in the state dir
-  (`~/.local/state/workday-tools/`, per the XDG spec). macOS keeps both under
-  `~/Library/Application Support/workday-tools/`. Nothing stores your Workday
-  password.
+  go in `~/.config/workday-tools/` on every platform. The saved Workday session
+  and Google tokens are app-managed state: `~/.local/state/workday-tools/` on
+  Linux and `~/Library/Application Support/workday-tools/` on macOS. Nothing
+  stores your Workday password.
 - The saved session and tokens are live credentials — treat those directories
   like an SSH key.
 ```

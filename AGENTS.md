@@ -76,10 +76,10 @@ spec before changing that area, and update it when you change the behavior.
   skips any employee already present (never overwriting manager responses). Scraped
   connections are cached in the state dir (`qc_cache.json`); `--refresh` re-scrapes,
   `--offline` works purely from the cache.
-- **Config/state/log dirs** (`config.py`): config + `credentials.json` in the
-  config dir (`XDG_CONFIG_HOME`/`~/.config`); session + `token.json` in the state
-  dir (`XDG_STATE_HOME`/`~/.local/state`); macOS uses Application Support for both.
-  The tray writes `tray.log` to `log_dir()` (`~/.local/state/.../logs`, or
+- **Config/state/log dirs** (`config.py`): config + `credentials.json` live in
+  `XDG_CONFIG_HOME`/`~/.config` on every platform; session + `token.json` live in
+  `XDG_STATE_HOME`/`~/.local/state` (or Application Support on macOS). The tray
+  writes `tray.log` to `log_dir()` (`~/.local/state/.../logs`, or
   `~/Library/Logs/...` on macOS).
 
 ## Running / dev
